@@ -1,0 +1,12 @@
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+
+# Spike output is per-run and account-specific; never commit it.
+spike/results.md
+
+# Never commit anything that could carry session tokens or cookies.
+*.session
+cookies/
+.pyicloud/

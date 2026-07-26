@@ -1,0 +1,11 @@
+# Phase 1 spike only. Not the app's dependency set.
+pyicloud>=2.6.5
+
+# keyring backend for Windows Credential Manager (pulled in by pyicloud, pinned
+# here so the session-persistence check has somewhere to persist to)
+keyring>=25.0
+
+# zoneinfo has no tz database on Windows; without this, ZoneInfo("America/New_York")
+# raises and the due-date test silently falls back to UTC, which would defeat
+# the point of the tz-awareness check.
+tzdata>=2024.1; sys_platform == "win32"
