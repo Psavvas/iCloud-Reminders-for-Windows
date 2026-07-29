@@ -77,6 +77,24 @@ class Recorder:
             lines.append(f"| {r.item} | {r.name} | **{r.status}** | {note} |")
         return "\n".join(lines)
 
+    def details(self) -> str:
+        """
+        Untruncated per-check detail. The table elides long text, which is
+        exactly where API error messages live -- so always emit this too.
+        """
+        out = ["## Full detail (untruncated)", ""]
+        for r in self.results:
+            out.append(f"### {r.item}. {r.name} — {r.status}")
+            out.append("")
+            out.append("```")
+            out.append(r.detail or "(no detail)")
+            if r.evidence:
+                out.append("")
+                out.append(r.evidence)
+            out.append("```")
+            out.append("")
+        return "\n".join(out)
+
     def exit_code(self) -> int:
         return 1 if any(r.status == FAIL for r in self.results) else 0
 

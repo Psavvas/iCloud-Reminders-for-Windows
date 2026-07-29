@@ -151,7 +151,22 @@ class Spike:
                 )
                 return
         else:
-            chosen = next((l for l in lists if not l.is_group), lists[0])
+            # Default to the inbox rather than whatever happens to sort first --
+            # write tests should land somewhere predictable.
+            usable = [l for l in lists if not l.is_group]
+            for wanted in ("inbox", "reminders"):
+                chosen = next(
+                    (l for l in usable if (l.title or "").strip().lower() == wanted),
+                    None,
+                )
+                if chosen is not None:
+                    break
+            if chosen is None:
+                chosen = usable[0] if usable else lists[0]
+                print(
+                    f"    NOTE: no list named 'Inbox' or 'Reminders'; "
+                    f"falling back to {chosen.title!r}. Use --list to override."
+                )
         self.target_list_id = chosen.id
         print(f"    using list {chosen.title!r} ({chosen.id}) for write tests")
 
@@ -461,7 +476,10 @@ class Spike:
         out = Path(__file__).resolve().parent / "results.md"
         out.write_text(
             "# Phase 1 spike results\n\n"
-            f"Run: {datetime.now(timezone.utc).isoformat()}\n\n" + table + "\n",
+            f"Run: {datetime.now(timezone.utc).isoformat()}\n\n"
+            + table
+            + "\n\n"
+            + self.rec.details(),
             encoding="utf-8",
         )
         print(f"Written to {out}")
