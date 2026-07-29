@@ -54,6 +54,24 @@ I could not execute these checks myself:
 Items 6 and 7 were nonetheless answered from the library source; see the notes
 below and in `list_create_experiment.py`.
 
+## Verdict
+
+Phase 1 ran against a live account. Items 1, 2, 3, 4 and 7 pass. Items 5 and 6
+fail, and both were pursued to a conclusion rather than abandoned early:
+
+- **Item 6 (create a list)** — a raw CloudKit `List` create is *accepted* by
+  Apple and the record comes back from `lists()`, but it never reaches the
+  device. Deprioritized by the account owner.
+- **Item 5 (tags)** — writing a `Hashtag` record produces a record that reads
+  back correctly over the API but never renders on the phone. Correcting the
+  `Name` encoding from `ENCRYPTED_BYTES` to the `STRING` form the iPhone itself
+  writes did **not** fix it, so the encoding was not the cause. Something else
+  is required to register a tag with the Reminders UI and it was not found.
+
+Note the asymmetry, which is what actually matters for the app: **reading tags
+works.** Tags created on the phone store `Name` as `STRING` and map cleanly
+through `tags_for()`. Only *writing* tags fails.
+
 ## Findings that change Phase 2 design
 
 **List colour is a JSON blob, not a hex string.** `RemindersList.color` comes
