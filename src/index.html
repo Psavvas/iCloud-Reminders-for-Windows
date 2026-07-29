@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>iCloud Reminders</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- Shown until we know whether there's a usable session. -->
+<div id="gate" class="gate">
+  <div class="gate-card">
+    <h1>iCloud Reminders</h1>
+
+    <div id="gate-loading" class="gate-step">
+      <div class="spinner"></div>
+      <p>Connecting…</p>
+    </div>
+
+    <form id="gate-login" class="gate-step hidden">
+      <label for="apple-id">Apple ID</label>
+      <input id="apple-id" type="email" autocomplete="username" placeholder="you@icloud.com" required />
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" required />
+      <p class="hint">Stored in Windows Credential Manager, never on disk in the clear.</p>
+      <button type="submit" class="primary">Sign in</button>
+    </form>
+
+    <form id="gate-2fa" class="gate-step hidden">
+      <label for="code">Verification code</label>
+      <input id="code" inputmode="numeric" maxlength="6" placeholder="123456" required />
+      <p class="hint">Approve the prompt on your iPhone, then type the six digits.</p>
+      <button type="submit" class="primary">Verify</button>
+    </form>
+
+    <div id="gate-terms" class="gate-step hidden">
+      <p class="warn">Apple needs you to accept updated iCloud terms before syncing.</p>
+      <p class="hint">Accept them at icloud.com, or continue to accept them here.</p>
+      <button id="accept-terms" class="primary">Accept and continue</button>
+    </div>
+
+    <p id="gate-error" class="error hidden"></p>
+  </div>
+</div>
+
+<!-- Main UI -->
+<div id="app" class="app hidden">
+
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <span class="brand">Reminders</span>
+      <button id="sync-btn" class="icon-btn" title="Sync now">⟳</button>
+    </div>
+
+    <nav id="lists" class="lists"></nav>
+
+    <div class="tag-section">
+      <div class="section-label">Tags</div>
+      <div id="tags" class="tags"></div>
+      <p class="hint tiny">Tags are read-only — Apple's API accepts tag writes
+        but the Reminders app never renders them.</p>
+    </div>
+
+    <div id="sync-status" class="sync-status"></div>
+  </aside>
+
+  <main class="list-pane">
+    <header class="list-head">
+      <h2 id="list-title">Reminders</h2>
+      <div class="list-actions">
+        <input id="search" type="search" placeholder="Search…" />
+        <label class="check"><input id="show-done" type="checkbox" /> Show completed</label>
+      </div>
+    </header>
+
+    <form id="quick-add" class="quick-add">
+      <input id="quick-title" placeholder="Add a reminder…" autocomplete="off" />
+      <button type="submit" class="primary">Add</button>
+    </form>
+
+    <ul id="reminders" class="reminders"></ul>
+    <p id="empty" class="empty hidden">Nothing here.</p>
+  </main>
+
+  <section id="detail" class="detail">
+    <p class="empty">Select a reminder.</p>
+  </section>
+</div>
+
+<div id="banner" class="banner hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

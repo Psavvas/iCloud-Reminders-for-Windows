@@ -10,3 +10,11 @@ spike/results.md
 *.session
 cookies/
 .pyicloud/
+
+# Build output
+node_modules/
+src-tauri/target/
+dist-sidecar/*
+!dist-sidecar/README.md
+build/
+*.spec
