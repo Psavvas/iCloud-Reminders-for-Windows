@@ -1,0 +1,8 @@
+{
+  "name": "reminders-screenshots",
+  "private": true,
+  "type": "module",
+  "description": "Renders the UI against a stubbed Tauri bridge and screenshots it",
+  "scripts": { "shoot": "node shoot.mjs" },
+  "devDependencies": { "playwright": "^1.49.0" }
+}

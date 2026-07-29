@@ -18,3 +18,6 @@ dist-sidecar/*
 !dist-sidecar/README.md
 build/
 *.spec
+
+# Screenshot tooling deps
+tools/screenshots/node_modules/

@@ -71,6 +71,11 @@ function priorityLabel(p) {
   return (PRIORITIES.find((x) => x.value === Number(p)) || PRIORITIES[0]).label;
 }
 
+/** Apple shows priority as exclamation marks: low !, medium !!, high !!!. */
+function priorityMarks(p) {
+  return { 1: "!!!", 5: "!!", 9: "!" }[Number(p)] || "";
+}
+
 function banner(message, kind = "info", timeout = 6000) {
   const el = $("banner");
   el.textContent = message;
@@ -242,6 +247,8 @@ async function loadLists() {
     row.querySelector(".list-name").textContent = l.title;
     row.onclick = () => selectList(l.id);
     nav.appendChild(row);
+    // With 14 lists the sidebar scrolls; keep the selected one on screen.
+    if (active) requestAnimationFrame(() => row.scrollIntoView({ block: "nearest" }));
   }
 }
 
@@ -286,11 +293,15 @@ async function loadReminders() {
     search: state.search || null,
   });
 
+  // Apple tints the list heading with the list's own colour.
+  const current = state.lists.find((l) => l.id === state.selectedList);
   $("list-title").textContent = state.selectedTag
     ? `#${state.selectedTag}`
-    : state.selectedList
-    ? (state.lists.find((l) => l.id === state.selectedList) || {}).title || "Reminders"
+    : current
+    ? current.title
     : "All";
+  $("list-title").style.color =
+    current && current.color_hex ? current.color_hex : "";
 
   const ul = $("reminders");
   ul.innerHTML = "";
@@ -326,11 +337,13 @@ async function loadReminders() {
       due.textContent = formatDue(r.due_date);
       meta.appendChild(due);
     }
-    if (Number(r.priority)) {
+    if (priorityMarks(r.priority)) {
       const p = document.createElement("span");
-      p.className = "pill p" + r.priority;
-      p.textContent = priorityLabel(r.priority);
-      meta.appendChild(p);
+      p.className = "prio p" + r.priority;
+      p.title = priorityLabel(r.priority);
+      p.textContent = priorityMarks(r.priority);
+      // Priority reads first in Apple's layout, before the date.
+      meta.insertBefore(p, meta.firstChild);
     }
     for (const t of r.tags || []) {
       const tag = document.createElement("span");
