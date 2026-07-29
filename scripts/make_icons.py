@@ -1,9 +1,10 @@
 """
 Generate the app icon set with no image-library dependency.
 
-Draws a rounded square in the app's accent blue with a white check mark, then
-writes PNGs plus a multi-resolution .ico (Windows needs the .ico for the exe
-resource, the installer, and the tray).
+Draws a Reminders-style mark: a light rounded square holding a short list --
+coloured bullets down the left, grey lines beside them -- then writes PNGs plus
+a multi-resolution .ico (Windows needs the .ico for the exe resource, the
+installer, and the tray).
 
 Run from the repo root:  python scripts/make_icons.py
 """
@@ -16,9 +17,17 @@ from pathlib import Path
 
 OUT = Path(__file__).resolve().parent.parent / "src-tauri" / "icons"
 
-ACCENT = (15, 108, 189)      # #0F6CBD, matches the UI accent
-ACCENT_DARK = (10, 84, 150)
-WHITE = (255, 255, 255)
+# Apple system colours for the bullets, top to bottom.
+BULLETS = [
+    (255, 59, 48),    # red
+    (255, 149, 0),    # orange
+    (0, 122, 255),    # blue
+    (52, 199, 89),    # green
+]
+LINE = (199, 199, 204)      # systemGray3
+FACE_TOP = (255, 255, 255)
+FACE_BOTTOM = (238, 238, 242)
+EDGE = (214, 214, 220)
 
 
 def _blend(dst, src, alpha):
@@ -36,70 +45,91 @@ def _coverage(px, py, test, samples=4):
     return hits / (samples * samples)
 
 
+def _rounded_rect(lo_x, lo_y, hi_x, hi_y, r):
+    """Point test for a rounded rectangle."""
+
+    def test(x, y):
+        if x < lo_x or x > hi_x or y < lo_y or y > hi_y:
+            return False
+        # Clamp to the corner-circle centre nearest this point.
+        cx = min(max(x, lo_x + r), hi_x - r)
+        cy = min(max(y, lo_y + r), hi_y - r)
+        dx, dy = x - cx, y - cy
+        return dx * dx + dy * dy <= r * r
+
+    return test
+
+
+def _circle(cx, cy, r):
+    def test(x, y):
+        return (x - cx) ** 2 + (y - cy) ** 2 <= r * r
+
+    return test
+
+
 def render(size: int) -> bytes:
     """Return RGBA pixel rows for one icon size."""
     s = float(size)
-    radius = s * 0.22
-    inset = s * 0.06
-    lo, hi = inset, s - inset
 
-    def in_rounded_rect(x, y):
-        if x < lo or x > hi or y < lo or y > hi:
-            return False
-        # Corner circles
-        for cx, cy in (
-            (lo + radius, lo + radius),
-            (hi - radius, lo + radius),
-            (lo + radius, hi - radius),
-            (hi - radius, hi - radius),
-        ):
-            if (x < lo + radius or x > hi - radius) and (
-                y < lo + radius or y > hi - radius
-            ):
-                near_x = cx
-                near_y = cy
-                if abs(x - near_x) > radius or abs(y - near_y) > radius:
-                    continue
-                return (x - near_x) ** 2 + (y - near_y) ** 2 <= radius * radius
-        return True
+    # Below 32px four rows turn to mush, so drop one and thicken everything.
+    rows = 4 if size >= 32 else 3
+    small = size < 32
 
-    # Check mark as two thick segments.
-    thickness = max(s * 0.085, 1.2)
-    p0 = (s * 0.30, s * 0.52)
-    p1 = (s * 0.44, s * 0.66)
-    p2 = (s * 0.72, s * 0.36)
+    inset = s * 0.045
+    face = _rounded_rect(inset, inset, s - inset, s - inset, s * 0.225)
+    # A hairline inset ring keeps the mark from dissolving on a white taskbar.
+    inner = _rounded_rect(
+        inset + s * 0.012, inset + s * 0.012,
+        s - inset - s * 0.012, s - inset - s * 0.012,
+        s * 0.213,
+    )
 
-    def near_segment(x, y, a, b, t):
-        ax, ay = a
-        bx, by = b
-        dx, dy = bx - ax, by - ay
-        L2 = dx * dx + dy * dy
-        if L2 == 0:
-            return False
-        u = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / L2))
-        px, py = ax + u * dx, ay + u * dy
-        return (x - px) ** 2 + (y - py) ** 2 <= (t / 2) ** 2
+    bullet_r = s * (0.075 if small else 0.062)
+    bullet_x = s * 0.29
+    line_h = s * (0.075 if small else 0.058)
+    line_x0 = s * (0.44 if small else 0.42)
+    line_x1 = s * 0.78
 
-    def in_check(x, y):
-        return near_segment(x, y, p0, p1, thickness) or near_segment(
-            x, y, p1, p2, thickness
-        )
+    # Distribute rows evenly through the middle of the face.
+    top, bottom = s * 0.30, s * 0.70
+    step = (bottom - top) / (rows - 1)
+    centres = [top + i * step for i in range(rows)]
 
-    rows = bytearray()
+    bullets = [
+        (_circle(bullet_x, cy, bullet_r), BULLETS[i % len(BULLETS)])
+        for i, cy in enumerate(centres)
+    ]
+    lines = [
+        _rounded_rect(line_x0, cy - line_h / 2, line_x1, cy + line_h / 2, line_h / 2)
+        for cy in centres
+    ]
+
+    out = bytearray()
     for y in range(size):
-        rows.append(0)  # PNG filter type: none
+        out.append(0)  # PNG filter type: none
         for x in range(size):
-            bg_a = _coverage(x, y, in_rounded_rect)
-            if bg_a <= 0.001:
-                rows += bytes((0, 0, 0, 0))
+            a = _coverage(x, y, face)
+            if a <= 0.001:
+                out += bytes((0, 0, 0, 0))
                 continue
-            # Vertical gradient for a bit of depth.
-            t = y / s
-            base = _blend(ACCENT, ACCENT_DARK, t * 0.55)
-            ck_a = _coverage(x, y, in_check)
-            colour = _blend(base, WHITE, ck_a) if ck_a > 0 else base
-            rows += bytes((*colour, round(bg_a * 255)))
-    return bytes(rows)
+
+            # Face: soft vertical gradient, with a faint edge ring.
+            colour = _blend(FACE_TOP, FACE_BOTTOM, y / s)
+            ring = a - _coverage(x, y, inner)
+            if ring > 0.02:
+                colour = _blend(colour, EDGE, min(ring, 1.0) * 0.9)
+
+            for test, tint in bullets:
+                cov = _coverage(x, y, test)
+                if cov > 0:
+                    colour = _blend(colour, tint, cov)
+            for test in lines:
+                cov = _coverage(x, y, test)
+                if cov > 0:
+                    colour = _blend(colour, LINE, cov)
+
+            out += bytes((*colour, round(a * 255)))
+    return bytes(out)
 
 
 def png_bytes(size: int, raw: bytes) -> bytes:
