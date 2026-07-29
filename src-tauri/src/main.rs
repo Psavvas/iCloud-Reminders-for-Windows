@@ -25,8 +25,9 @@ use crate::sidecar::Sidecar;
 /// and cheap enough to be invisible: it's one indexed SQLite query.
 const TICK_SECONDS: u64 = 30;
 
-/// Background sync cadence, inside the 5-15 minute band from the brief.
-const SYNC_SECONDS: u64 = 10 * 60;
+/// Fallback sync cadence when settings can't be read. Inside the 5-15 minute
+/// band from the brief; Settings can move it within that range.
+const SYNC_SECONDS_DEFAULT: u64 = 10 * 60;
 
 /// The sidecar handle is optional and replaceable. If it fails to start we
 /// still manage state, so commands return a diagnosable error rather than
@@ -162,6 +163,11 @@ async fn call(
         "sync_status",
         "conflicts",
         "resolve_conflict",
+        "smart_counts",
+        "settings",
+        "set_settings",
+        "sign_out",
+        "restore_reminder",
     ];
     if !ALLOWED.contains(&method.as_str()) {
         return Err(format!("method {method} is not exposed to the UI"));
@@ -184,6 +190,24 @@ async fn call(
     };
 
     sc.call(&method, params.unwrap_or(json!({}))).await
+}
+
+#[tauri::command]
+fn get_autostart(app: AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    if enabled {
+        mgr.enable().map_err(|e| e.to_string())?;
+    } else {
+        mgr.disable().map_err(|e| e.to_string())?;
+    }
+    mgr.is_enabled().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -253,12 +277,29 @@ async fn notification_loop(app: AppHandle) {
 /// Background delta sync. Failures are logged and retried next tick; the UI
 /// keeps serving the cache regardless.
 async fn sync_loop(app: AppHandle) {
-    let mut ticker = interval(Duration::from_secs(SYNC_SECONDS));
+    // Ticks once a minute and syncs when enough of them have passed, so a
+    // change to the interval in Settings takes effect without a restart.
+    let mut ticker = interval(Duration::from_secs(60));
+    let mut elapsed: u64 = 0;
     loop {
         ticker.tick().await;
         let Some(sc) = app.state::<AppState>().get() else {
             continue;
         };
+        elapsed += 60;
+
+        let every = sc
+            .call("sync_status", json!({}))
+            .await
+            .ok()
+            .and_then(|v| v.get("sync_minutes").and_then(|m| m.as_u64()))
+            .map(|m| m.clamp(1, 60) * 60)
+            .unwrap_or(SYNC_SECONDS_DEFAULT);
+
+        if elapsed < every {
+            continue;
+        }
+        elapsed = 0;
         if let Err(e) = sc.call("sync", json!({})).await {
             log::warn!("background sync failed: {e}");
             let _ = app.emit("app://sync_failed", json!({ "error": e }));
@@ -391,7 +432,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             call,
             sidecar_status,
-            restart_sidecar
+            restart_sidecar,
+            get_autostart,
+            set_autostart
         ])
         .run(tauri::generate_context!())
         .expect("error while running application");

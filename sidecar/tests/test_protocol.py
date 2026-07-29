@@ -124,7 +124,8 @@ def test_due_notifications_returns_serializable_plan(server):
 def test_sync_status_shape(server):
     st = call(server, "sync_status")
     assert set(st) == {
-        "running", "last_sync", "has_cursor", "pending_pushes", "conflicts"
+        "running", "last_sync", "has_cursor", "pending_pushes", "conflicts",
+        "sync_minutes",
     }
 
 

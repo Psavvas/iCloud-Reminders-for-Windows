@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -249,14 +249,37 @@ class Cache:
             self._conn.commit()
         return n
 
+    @staticmethod
+    def _day_bounds(now: Optional[datetime] = None) -> tuple[str, str]:
+        """
+        Start of today and start of tomorrow, as UTC ISO strings.
+
+        Computed from the machine's local calendar day, not UTC's -- "today"
+        means the user's today. The sidecar runs on their machine, so local
+        time is the right reference.
+        """
+        local_now = (now or utcnow()).astimezone()
+        start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        return to_iso(start), to_iso(end)
+
     def reminders(
         self,
         list_id: Optional[str] = None,
         tag: Optional[str] = None,
+        scope: Optional[str] = None,
         include_completed: bool = False,
         search: Optional[str] = None,
         limit: int = 1000,
+        now: Optional[datetime] = None,
     ) -> list[dict]:
+        """
+        Query the cache.
+
+        `scope` selects a smart list: today, upcoming, completed, deleted, all.
+        Anything else (including None) is the plain view, optionally narrowed by
+        list or tag.
+        """
         sql = [
             "SELECT r.* FROM reminders r",
         ]
@@ -264,12 +287,30 @@ class Cache:
         if tag:
             sql.append("JOIN tags t ON t.reminder_id = r.id AND t.name = ?")
             args.append(tag)
-        sql.append("WHERE r.deleted = 0")
+
+        # Deleted is the only scope that looks at soft-deleted rows.
+        sql.append("WHERE r.deleted = %d" % (1 if scope == "deleted" else 0))
+
+        if scope == "today":
+            # Apple's Today includes anything already overdue, not just today's.
+            _start, end = self._day_bounds(now)
+            sql.append("AND r.completed = 0 AND r.due_date IS NOT NULL AND r.due_date < ?")
+            args.append(end)
+        elif scope == "upcoming":
+            _start, end = self._day_bounds(now)
+            sql.append("AND r.completed = 0 AND r.due_date IS NOT NULL AND r.due_date >= ?")
+            args.append(end)
+        elif scope == "completed":
+            sql.append("AND r.completed = 1")
+        elif scope == "deleted":
+            pass  # the deleted flag above is the whole filter
+        else:
+            if not include_completed:
+                sql.append("AND r.completed = 0")
+
         if list_id:
             sql.append("AND r.list_id = ?")
             args.append(list_id)
-        if not include_completed:
-            sql.append("AND r.completed = 0")
         if search:
             sql.append("AND (r.title LIKE ? OR r.description LIKE ?)")
             like = f"%{search}%"
@@ -395,6 +436,55 @@ class Cache:
                 [(t["id"], t["name"], reminder_id) for t in tags],
             )
             self._conn.commit()
+
+    def smart_counts(self, now: Optional[datetime] = None) -> dict:
+        """Badge counts for the smart lists, in one pass each."""
+        _start, end = self._day_bounds(now)
+        with self._lock:
+            q = lambda sql, a=(): self._conn.execute(sql, a).fetchone()[0]  # noqa: E731
+            return {
+                "today": q(
+                    "SELECT COUNT(*) FROM reminders WHERE deleted=0 AND completed=0 "
+                    "AND due_date IS NOT NULL AND due_date < ?", (end,)
+                ),
+                "upcoming": q(
+                    "SELECT COUNT(*) FROM reminders WHERE deleted=0 AND completed=0 "
+                    "AND due_date IS NOT NULL AND due_date >= ?", (end,)
+                ),
+                "completed": q(
+                    "SELECT COUNT(*) FROM reminders WHERE deleted=0 AND completed=1"
+                ),
+                "deleted": q("SELECT COUNT(*) FROM reminders WHERE deleted=1"),
+                "all": q(
+                    "SELECT COUNT(*) FROM reminders WHERE deleted=0 AND completed=0"
+                ),
+            }
+
+    # -------------------------------------------------------------- settings
+    def get_settings(self) -> dict:
+        """User preferences, with defaults filled in for anything unset."""
+        defaults = {
+            "theme": "system",              # system | light | dark
+            "sync_minutes": 10,
+            "notifications_enabled": True,
+            "stale_after_minutes": 60,
+            "max_individual_toasts": 3,
+            "default_list_id": None,
+            "search_scope": "list",         # list | global
+        }
+        raw = self.get_meta("settings")
+        if raw:
+            try:
+                defaults.update(json.loads(raw))
+            except ValueError:
+                pass
+        return defaults
+
+    def set_settings(self, patch: dict) -> dict:
+        merged = self.get_settings()
+        merged.update({k: v for k, v in (patch or {}).items() if k in merged})
+        self.set_meta("settings", json.dumps(merged))
+        return merged
 
     def all_tags(self) -> list[dict]:
         with self._lock:

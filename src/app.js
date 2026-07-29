@@ -14,14 +14,27 @@ const call = (method, params = {}) => invoke("call", { method, params });
 const state = {
   lists: [],
   tags: [],
+  counts: {},
+  settings: {},
+  // Exactly one of these three is active at a time.
+  scope: "today",
   selectedList: null,
   selectedTag: null,
   selectedReminder: null,
   search: "",
+  searchScope: "list",
   showDone: false,
 };
 
 const $ = (id) => document.getElementById(id);
+
+const SMART = [
+  { key: "today", label: "Today", glyph: "◉", color: "#007aff" },
+  { key: "upcoming", label: "Upcoming", glyph: "▤", color: "#ff3b30" },
+  { key: "all", label: "All", glyph: "≡", color: "#8e8e93" },
+  { key: "completed", label: "Completed", glyph: "✓", color: "#34c759" },
+  { key: "deleted", label: "Deleted", glyph: "✕", color: "#8e8e93" },
+];
 
 // ------------------------------------------------------------------ helpers
 
@@ -83,19 +96,6 @@ function banner(message, kind = "info", timeout = 6000) {
   if (timeout) setTimeout(() => el.classList.add("hidden"), timeout);
 }
 
-// --------------------------------------------------------------------- auth
-
-function showStep(id) {
-  for (const s of document.querySelectorAll(".gate-step")) s.classList.add("hidden");
-  if (id) $(id).classList.remove("hidden");
-}
-
-function gateError(msg) {
-  const el = $("gate-error");
-  el.textContent = msg || "";
-  el.classList.toggle("hidden", !msg);
-}
-
 /** Errors arrive as a JSON string from the sidecar; pull out the useful bits. */
 function parseError(e) {
   try {
@@ -108,6 +108,25 @@ function parseError(e) {
   } catch {
     return { code: "ERROR", message: String(e), detail: "" };
   }
+}
+
+function applyTheme(theme) {
+  const root = document.documentElement;
+  if (theme === "light" || theme === "dark") root.dataset.theme = theme;
+  else delete root.dataset.theme;
+}
+
+// --------------------------------------------------------------------- auth
+
+function showStep(id) {
+  for (const s of document.querySelectorAll(".gate-step")) s.classList.add("hidden");
+  if (id) $(id).classList.remove("hidden");
+}
+
+function gateError(msg) {
+  const el = $("gate-error");
+  el.textContent = msg || "";
+  el.classList.toggle("hidden", !msg);
 }
 
 /** Render the "sidecar isn't running" gate, including where we looked. */
@@ -139,6 +158,12 @@ $("retry-sidecar").addEventListener("click", async () => {
 async function boot() {
   try {
     const st = await call("auth_status");
+    try {
+      state.settings = await call("settings");
+      applyTheme(state.settings.theme);
+      state.searchScope = state.settings.search_scope || "list";
+    } catch { /* defaults are fine */ }
+
     if (st.authenticated) return enterApp();
     if (st.has_cache) {
       // Cache is usable even without a session, so show the data and let the
@@ -160,6 +185,7 @@ async function boot() {
 $("gate-login").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   gateError("");
+  $("gate-loading-text").textContent = "Signing in…";
   showStep("gate-loading");
   try {
     await call("login", {
@@ -170,8 +196,9 @@ $("gate-login").addEventListener("submit", async (ev) => {
   } catch (e) {
     const { code, message, detail } = parseError(e);
     if (code === "2FA_REQUIRED") {
-      try { await call("request_2fa"); } catch { /* code may already be sent */ }
+      try { await call("request_2fa"); } catch { /* may already be sent */ }
       showStep("gate-2fa");
+      $("code").focus();
     } else if (code === "TERMS_REQUIRED") {
       showStep("gate-terms");
     } else if (code === "SIDECAR_DOWN") {
@@ -189,6 +216,15 @@ $("gate-2fa").addEventListener("submit", async (ev) => {
   try {
     await call("submit_2fa", { code: $("code").value.trim() });
     enterApp();
+  } catch (e) {
+    gateError(parseError(e).message);
+  }
+});
+
+$("resend-2fa").addEventListener("click", async () => {
+  try {
+    await call("request_2fa");
+    banner("New code sent.", "ok", 3000);
   } catch (e) {
     gateError(parseError(e).message);
   }
@@ -218,22 +254,41 @@ async function enterApp() {
 // ------------------------------------------------------------------ render
 
 async function refreshAll() {
-  await Promise.all([loadLists(), loadTags()]);
+  await Promise.all([loadLists(), loadTags(), loadCounts()]);
   await loadReminders();
   await refreshSyncStatus();
+}
+
+async function loadCounts() {
+  try {
+    state.counts = await call("smart_counts");
+  } catch {
+    state.counts = {};
+  }
+  renderSmart();
+}
+
+function renderSmart() {
+  const nav = $("smart");
+  nav.innerHTML = "";
+  for (const s of SMART) {
+    const row = document.createElement("button");
+    const active = state.scope === s.key && !state.selectedList && !state.selectedTag;
+    row.className = "smart-row" + (active ? " active" : "");
+    row.innerHTML = `
+      <span class="glyph" style="background:${s.color}">${s.glyph}</span>
+      <span class="list-name"></span>
+      <span class="count">${state.counts[s.key] ?? ""}</span>`;
+    row.querySelector(".list-name").textContent = s.label;
+    row.onclick = () => selectScope(s.key);
+    nav.appendChild(row);
+  }
 }
 
 async function loadLists() {
   state.lists = await call("lists");
   const nav = $("lists");
   nav.innerHTML = "";
-
-  const all = document.createElement("button");
-  all.className = "list-row" + (state.selectedList === null && !state.selectedTag ? " active" : "");
-  all.innerHTML = `<span class="dot" style="background:#8E8E93"></span>
-    <span class="list-name">All</span>`;
-  all.onclick = () => selectList(null);
-  nav.appendChild(all);
 
   for (const l of state.lists) {
     const row = document.createElement("button");
@@ -269,65 +324,119 @@ async function loadTags() {
   }
 }
 
+function selectScope(key) {
+  state.scope = key;
+  state.selectedList = null;
+  state.selectedTag = null;
+  redraw();
+}
+
 function selectList(id) {
   state.selectedList = id;
+  state.scope = null;
   state.selectedTag = null;
-  loadLists();
-  loadTags();
-  loadReminders();
+  redraw();
 }
 
 function selectTag(name) {
   state.selectedTag = name;
   state.selectedList = null;
+  state.scope = name ? null : "today";
+  redraw();
+}
+
+function redraw() {
+  renderSmart();
   loadLists();
   loadTags();
   loadReminders();
 }
 
+/** What the header should say, given the current selection. */
+function currentTitle() {
+  if (state.selectedTag) return { text: `#${state.selectedTag}`, color: "" };
+  if (state.selectedList) {
+    const l = state.lists.find((x) => x.id === state.selectedList);
+    return { text: l ? l.title : "Reminders", color: (l && l.color_hex) || "" };
+  }
+  const s = SMART.find((x) => x.key === state.scope);
+  return { text: s ? s.label : "Reminders", color: s ? s.color : "" };
+}
+
 async function loadReminders() {
-  const rows = await call("reminders", {
-    list_id: state.selectedList,
-    tag: state.selectedTag,
+  // Global search ignores the current selection; that's the point of it.
+  const globalSearch = state.search && state.searchScope === "global";
+  const params = {
     include_completed: state.showDone,
     search: state.search || null,
-  });
+  };
+  if (!globalSearch) {
+    params.list_id = state.selectedList;
+    params.tag = state.selectedTag;
+    params.scope = state.scope;
+  }
 
-  // Apple tints the list heading with the list's own colour.
-  const current = state.lists.find((l) => l.id === state.selectedList);
-  $("list-title").textContent = state.selectedTag
-    ? `#${state.selectedTag}`
-    : current
-    ? current.title
-    : "All";
-  $("list-title").style.color =
-    current && current.color_hex ? current.color_hex : "";
+  const rows = await call("reminders", params);
 
-  // The glass surfaces need something behind them to refract, so the app
-  // backdrop picks up a wash of the current list's colour.
-  document.documentElement.style.setProperty(
-    "--tint",
-    (current && current.color_hex) || "#7f7fd5"
-  );
+  const t = globalSearch ? { text: "All Reminders", color: "" } : currentTitle();
+  $("list-title").textContent = t.text;
+  $("list-title").style.color = t.color || "";
+
+  const note = $("result-note");
+  if (state.search) {
+    note.textContent = `${rows.length} result${rows.length === 1 ? "" : "s"} ${
+      globalSearch ? "everywhere" : "in this list"
+    }`;
+  } else {
+    note.textContent = "";
+  }
 
   const ul = $("reminders");
   ul.innerHTML = "";
   $("empty").classList.toggle("hidden", rows.length > 0);
+  $("empty").textContent = state.search
+    ? "No matches."
+    : state.scope === "deleted"
+    ? "Nothing deleted."
+    : state.scope === "completed"
+    ? "Nothing completed yet."
+    : "Nothing here.";
+
+  const inTrash = state.scope === "deleted";
 
   for (const r of rows) {
     const li = document.createElement("li");
     li.className = "reminder" + (r.completed ? " done" : "");
     if (state.selectedReminder === r.id) li.classList.add("selected");
 
-    const box = document.createElement("input");
-    box.type = "checkbox";
-    box.checked = !!r.completed;
-    box.onclick = async (ev) => {
-      ev.stopPropagation();
-      await call("update_reminder", { id: r.id, completed: box.checked });
-      loadReminders();
-      loadLists();
-    };
+    if (inTrash) {
+      // A checkbox makes no sense on a deleted row; offer the undo instead.
+      const restore = document.createElement("button");
+      restore.className = "restore-btn";
+      restore.textContent = "↺";
+      restore.title = "Put back";
+      restore.onclick = async (ev) => {
+        ev.stopPropagation();
+        await call("restore_reminder", { id: r.id });
+        await loadReminders();
+        await loadCounts();
+        await loadLists();
+        banner("Restored.", "ok", 2500);
+      };
+      li.appendChild(restore);
+    } else {
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = !!r.completed;
+      box.onclick = async (ev) => {
+        ev.stopPropagation();
+        await call("update_reminder", { id: r.id, completed: box.checked });
+        await loadReminders();
+        await loadCounts();
+        await loadLists();
+      };
+      li.appendChild(box);
+    }
 
     const main = document.createElement("div");
     main.className = "reminder-main";
@@ -338,19 +447,30 @@ async function loadReminders() {
 
     const meta = document.createElement("div");
     meta.className = "reminder-meta";
+    if (priorityMarks(r.priority)) {
+      const p = document.createElement("span");
+      p.className = "prio p" + r.priority;
+      p.title = priorityLabel(r.priority);
+      p.textContent = priorityMarks(r.priority);
+      meta.appendChild(p);
+    }
     if (r.due_date) {
       const due = document.createElement("span");
       due.className = "due " + dueClass(r.due_date, r.completed);
       due.textContent = formatDue(r.due_date);
       meta.appendChild(due);
     }
-    if (priorityMarks(r.priority)) {
-      const p = document.createElement("span");
-      p.className = "prio p" + r.priority;
-      p.title = priorityLabel(r.priority);
-      p.textContent = priorityMarks(r.priority);
-      // Priority reads first in Apple's layout, before the date.
-      meta.insertBefore(p, meta.firstChild);
+    // Which list a reminder is in only matters when the view spans lists --
+    // which a global search does even while a list is selected.
+    if (!state.selectedList || globalSearch) {
+      const l = state.lists.find((x) => x.id === r.list_id);
+      if (l) {
+        const chip = document.createElement("span");
+        chip.className = "list-chip";
+        chip.style.color = l.color_hex || "";
+        chip.textContent = l.title;
+        meta.appendChild(chip);
+      }
     }
     for (const t of r.tags || []) {
       const tag = document.createElement("span");
@@ -362,12 +482,10 @@ async function loadReminders() {
       const d = document.createElement("span");
       d.className = "pending";
       d.title = "Not yet synced to iCloud";
-      d.textContent = "•";
       meta.appendChild(d);
     }
     if (meta.childNodes.length) main.appendChild(meta);
 
-    li.appendChild(box);
     li.appendChild(main);
     li.onclick = () => showDetail(r.id);
     ul.appendChild(li);
@@ -446,6 +564,7 @@ async function showDetail(id) {
       priority: Number($("d-priority").value),
     });
     await loadReminders();
+    await loadCounts();
     await showDetail(r.id);
     banner("Saved.", "ok", 2500);
   };
@@ -455,15 +574,16 @@ async function showDetail(id) {
     state.selectedReminder = null;
     pane.innerHTML = `<p class="empty">Select a reminder.</p>`;
     await loadReminders();
+    await loadCounts();
     await loadLists();
   };
 }
 
-// ------------------------------------------------------------------ actions
+// -------------------------------------------------------------- new reminder
 
-/** The list a new reminder lands in: whatever's selected, else Inbox. */
 function defaultListId() {
   return (
+    state.settings.default_list_id ||
     state.selectedList ||
     (state.lists.find((l) => (l.title || "").toLowerCase() === "inbox") ||
       state.lists.find((l) => !l.is_group) ||
@@ -471,25 +591,27 @@ function defaultListId() {
   );
 }
 
-function openNewDialog() {
-  const dlg = $("new-dialog");
-  if (!state.lists.length) return banner("No lists loaded yet.", "warn");
-
-  const listSel = $("new-list");
-  listSel.innerHTML = "";
+function fillListSelect(sel, includeNone = false) {
+  sel.innerHTML = includeNone ? `<option value="">Inbox (default)</option>` : "";
   for (const l of state.lists.filter((x) => !x.is_group)) {
     const opt = document.createElement("option");
     opt.value = l.id;
     opt.textContent = l.title;
-    listSel.appendChild(opt);
+    sel.appendChild(opt);
   }
-  listSel.value = defaultListId() || listSel.options[0]?.value;
+}
 
-  const prioSel = $("new-priority");
-  prioSel.innerHTML = PRIORITIES.map(
+function openNewDialog() {
+  const dlg = $("new-dialog");
+  if (!state.lists.length) return banner("No lists loaded yet.", "warn");
+
+  fillListSelect($("new-list"));
+  $("new-list").value = defaultListId() || $("new-list").options[0]?.value;
+
+  $("new-priority").innerHTML = PRIORITIES.map(
     (p) => `<option value="${p.value}">${p.label}</option>`
   ).join("");
-  prioSel.value = "0";
+  $("new-priority").value = "0";
 
   $("new-title").value = "";
   $("new-notes").value = "";
@@ -504,9 +626,11 @@ $("new-cancel").addEventListener("click", () => $("new-dialog").close());
 $("new-due-clear").addEventListener("click", () => ($("new-due").value = ""));
 
 // Clicking the backdrop dismisses, matching how Apple's sheets behave.
-$("new-dialog").addEventListener("click", (ev) => {
-  if (ev.target === $("new-dialog")) $("new-dialog").close();
-});
+for (const id of ["new-dialog", "settings-dialog"]) {
+  $(id).addEventListener("click", (ev) => {
+    if (ev.target === $(id)) $(id).close();
+  });
+}
 
 $("new-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
@@ -522,31 +646,138 @@ $("new-form").addEventListener("submit", async (ev) => {
     list_id: listId,
     title,
     description: $("new-notes").value,
-    // No zone on a datetime-local value; the sidecar resolves it against the
-    // local zone rather than letting Apple read it as UTC.
     due_date: due ? due + ":00" : null,
     priority: Number($("new-priority").value),
   });
   await loadReminders();
+  await loadCounts();
   await loadLists();
 });
 
-// Ctrl+N anywhere, and "n" when not typing into something.
-document.addEventListener("keydown", (ev) => {
-  const dlg = $("new-dialog");
-  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
-  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "n") {
-    ev.preventDefault();
-    if (!dlg.open) openNewDialog();
-  } else if (ev.key === "n" && !typing && !dlg.open && !$("app").classList.contains("hidden")) {
-    ev.preventDefault();
-    openNewDialog();
+// ----------------------------------------------------------------- settings
+
+async function openSettings() {
+  const dlg = $("settings-dialog");
+  const s = (state.settings = await call("settings"));
+
+  $("set-theme").value = s.theme || "system";
+  $("set-sync").value = String(s.sync_minutes || 10);
+  $("set-search-scope").value = s.search_scope || "list";
+  $("set-notify").checked = s.notifications_enabled !== false;
+  $("set-stale").value = String(s.stale_after_minutes || 60);
+
+  fillListSelect($("set-default-list"), true);
+  $("set-default-list").value = s.default_list_id || "";
+
+  try {
+    $("set-autostart").checked = await invoke("get_autostart");
+    $("autostart-note").textContent = "";
+  } catch (e) {
+    $("set-autostart").disabled = true;
+    $("autostart-note").textContent = "Couldn't read the startup setting: " + e;
+  }
+
+  $("set-account").textContent = state.appleId || "Signed in";
+  dlg.showModal();
+}
+
+async function saveSettings(patch) {
+  state.settings = await call("set_settings", patch);
+  if ("theme" in patch) applyTheme(state.settings.theme);
+  if ("search_scope" in patch) {
+    state.searchScope = state.settings.search_scope;
+    updateScopeButton();
+  }
+}
+
+$("settings-btn").addEventListener("click", openSettings);
+$("settings-close").addEventListener("click", () => $("settings-dialog").close());
+
+$("set-theme").addEventListener("change", (e) => saveSettings({ theme: e.target.value }));
+$("set-sync").addEventListener("change", (e) =>
+  saveSettings({ sync_minutes: Number(e.target.value) })
+);
+$("set-search-scope").addEventListener("change", (e) =>
+  saveSettings({ search_scope: e.target.value })
+);
+$("set-notify").addEventListener("change", (e) =>
+  saveSettings({ notifications_enabled: e.target.checked })
+);
+$("set-stale").addEventListener("change", (e) =>
+  saveSettings({ stale_after_minutes: Number(e.target.value) })
+);
+$("set-default-list").addEventListener("change", (e) =>
+  saveSettings({ default_list_id: e.target.value || null })
+);
+
+$("set-autostart").addEventListener("change", async (e) => {
+  try {
+    const on = await invoke("set_autostart", { enabled: e.target.checked });
+    e.target.checked = on;
+  } catch (err) {
+    e.target.checked = !e.target.checked;
+    $("autostart-note").textContent = "Couldn't change it: " + err;
   }
 });
 
+$("set-full-sync").addEventListener("click", async () => {
+  await call("sync", { full: true });
+  $("settings-dialog").close();
+  banner("Re-downloading everything…", "info", 4000);
+});
+
+$("set-signout").addEventListener("click", async () => {
+  await call("sign_out", {});
+  $("settings-dialog").close();
+  $("app").classList.add("hidden");
+  $("gate").classList.remove("hidden");
+  showStep("gate-login");
+});
+
+// ------------------------------------------------------------------- search
+
+function updateScopeButton() {
+  $("search-scope").textContent =
+    state.searchScope === "global" ? "Everywhere" : "In List";
+  $("search-scope").classList.toggle("global", state.searchScope === "global");
+}
+
+function openSearch() {
+  $("search-wrap").classList.add("open");
+  $("search").focus();
+}
+
+function closeSearch() {
+  $("search-wrap").classList.remove("open");
+  if (state.search) {
+    state.search = "";
+    $("search").value = "";
+    loadReminders();
+  }
+}
+
+$("search-btn").addEventListener("click", openSearch);
+$("search-close").addEventListener("click", closeSearch);
+
+$("search-scope").addEventListener("click", () => {
+  state.searchScope = state.searchScope === "global" ? "list" : "global";
+  updateScopeButton();
+  saveSettings({ search_scope: state.searchScope });
+  if (state.search) loadReminders();
+});
+
+let searchTimer = null;
 $("search").addEventListener("input", (e) => {
   state.search = e.target.value.trim();
-  loadReminders();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(loadReminders, 140);
+});
+
+$("search").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    e.stopPropagation();
+    closeSearch();
+  }
 });
 
 $("show-done").addEventListener("change", (e) => {
@@ -558,6 +789,32 @@ $("sync-btn").addEventListener("click", async () => {
   await call("sync", {});
   banner("Syncing…", "info", 2000);
 });
+
+// ---------------------------------------------------------------- shortcuts
+
+document.addEventListener("keydown", (ev) => {
+  const dlg = $("new-dialog");
+  const settings = $("settings-dialog");
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+  const inApp = !$("app").classList.contains("hidden");
+  const mod = ev.ctrlKey || ev.metaKey;
+
+  if (mod && ev.key.toLowerCase() === "n") {
+    ev.preventDefault();
+    if (!dlg.open) openNewDialog();
+  } else if (mod && ev.key.toLowerCase() === "f") {
+    ev.preventDefault();
+    if (inApp) openSearch();
+  } else if (mod && ev.key === ",") {
+    ev.preventDefault();
+    if (inApp && !settings.open) openSettings();
+  } else if (ev.key === "n" && !typing && !dlg.open && inApp) {
+    ev.preventDefault();
+    openNewDialog();
+  }
+});
+
+// ------------------------------------------------------------------- status
 
 async function refreshSyncStatus() {
   try {
@@ -631,8 +888,6 @@ listen("sidecar://sync_error", (e) => {
 listen("sidecar://conflict", () => refreshSyncStatus());
 listen("sidecar://died", (e) => {
   const err = (e.payload || {}).error || "";
-  // If we never got past the gate, show the actionable panel rather than a
-  // banner the user cannot do anything about.
   if (!$("app").classList.contains("hidden")) {
     banner("The sync service stopped. Reconnecting…", "warn", 0);
   } else {
@@ -644,8 +899,12 @@ listen("sidecar://restarted", () => {
   banner("Sync service reconnected.", "ok", 3000);
   boot();
 });
-listen("app://notified", () => loadReminders());
+listen("app://notified", () => {
+  loadReminders();
+  loadCounts();
+});
 
 setInterval(refreshSyncStatus, 15000);
 
+updateScopeButton();
 boot();

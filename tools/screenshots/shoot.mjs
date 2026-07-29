@@ -57,6 +57,16 @@ const selectInbox = async (page) => {
   await page.waitForTimeout(400);
 };
 
+const clickSmart = async (page, label) => {
+  await page.evaluate((l) => {
+    const r = [...document.querySelectorAll(".smart-row")].find((x) =>
+      x.textContent.includes(l)
+    );
+    if (r) r.click();
+  }, label);
+  await page.waitForTimeout(400);
+};
+
 const openDetail = async (page) => {
   await selectInbox(page);
   await page.evaluate(() => {
@@ -103,6 +113,30 @@ await shoot("07-new-reminder", {
     await page.fill("#new-title", "Order lab safety goggles");
     await page.fill("#new-notes", "Needed before Thursday's titration.");
     await page.selectOption("#new-priority", "5");
+  },
+});
+
+
+await shoot("08-today", { prep: (p) => clickSmart(p, "Today") });
+
+await shoot("09-search-global", {
+  prep: async (page) => {
+    await selectInbox(page);
+    await page.click("#search-btn");
+    await page.waitForTimeout(280);
+    await page.click("#search-scope");
+    await page.fill("#search", "lab");
+    await page.waitForTimeout(350);
+  },
+});
+
+await shoot("10-deleted", { prep: (p) => clickSmart(p, "Deleted"), dark: true });
+
+await shoot("11-settings", {
+  prep: async (page) => {
+    await selectInbox(page);
+    await page.click("#settings-btn");
+    await page.waitForTimeout(350);
   },
 });
 

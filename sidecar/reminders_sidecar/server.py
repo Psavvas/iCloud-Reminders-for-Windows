@@ -63,6 +63,11 @@ class Server:
             "request_2fa": lambda p: {"sent": self.client.request_2fa()},
             "lists": lambda p: self.cache.lists(),
             "reminders": self.m_reminders,
+            "smart_counts": lambda p: self.cache.smart_counts(),
+            "settings": lambda p: self.cache.get_settings(),
+            "set_settings": lambda p: self.cache.set_settings(p or {}),
+            "sign_out": self.m_sign_out,
+            "restore_reminder": self.m_restore_reminder,
             "reminder": lambda p: self.cache.reminder(p["id"]),
             "tags": lambda p: self.cache.all_tags(),
             "create_reminder": self.m_create_reminder,
@@ -107,10 +112,33 @@ class Server:
         return self.cache.reminders(
             list_id=p.get("list_id"),
             tag=p.get("tag"),
+            scope=p.get("scope"),
             include_completed=bool(p.get("include_completed")),
             search=p.get("search"),
             limit=int(p.get("limit") or 1000),
         )
+
+    def m_sign_out(self, p: dict) -> dict:
+        """
+        Drop the session but keep the cache, so the app still shows data while
+        signed out. Passing purge=true clears the cached reminders too.
+        """
+        self.client = ICloudClient(self.apple_id, cookie_dir=self.client.cookie_dir)
+        self.sync = SyncEngine(self.cache, self.client, emit=self.emit)
+        if p.get("purge"):
+            self.cache.set_meta(CURSOR_KEY, None)
+        return {"signed_out": True}
+
+    def m_restore_reminder(self, p: dict) -> dict:
+        """Undo a soft delete, which is what makes the Deleted list useful."""
+        rid = p["id"]
+        current = self.cache.reminder(rid)
+        if not current:
+            raise SidecarError(f"No such reminder: {rid}")
+        self.cache.apply_local_edit(rid, {"deleted": 0})
+        self.cache.enqueue(rid, "update", {"deleted": False}, current.get("change_tag"))
+        self._kick_push()
+        return self.cache.reminder(rid)
 
     # writes ----------------------------------------------------------------
     def m_create_reminder(self, p: dict) -> dict:
@@ -193,6 +221,7 @@ class Server:
             "has_cursor": bool(self.cache.get_meta(CURSOR_KEY)),
             "pending_pushes": len(self.cache.pending()),
             "conflicts": len(self.cache.conflicts()),
+            "sync_minutes": int(self.cache.get_settings().get("sync_minutes") or 10),
         }
 
     def _kick_sync(self, full: bool = False) -> None:
@@ -220,12 +249,19 @@ class Server:
 
     # notifications ---------------------------------------------------------
     def m_due_notifications(self, p: dict) -> dict:
+        cfg = self.cache.get_settings()
+        if not cfg.get("notifications_enabled", True):
+            return {"toasts": [], "notified_ids": []}
         now = from_iso(p.get("now")) or utcnow()
         plan = plan_notifications(
             self.cache,
             now=now,
-            stale_after_minutes=int(p.get("stale_after_minutes") or 60),
-            max_individual=int(p.get("max_individual") or 3),
+            stale_after_minutes=int(
+                p.get("stale_after_minutes") or cfg.get("stale_after_minutes") or 60
+            ),
+            max_individual=int(
+                p.get("max_individual") or cfg.get("max_individual_toasts") or 3
+            ),
         )
         return plan.to_dict()
 

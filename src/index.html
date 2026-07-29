@@ -11,45 +11,73 @@
 <!-- Shown until we know whether there's a usable session. -->
 <div id="gate" class="gate">
   <div class="gate-card">
+    <div class="gate-mark" aria-hidden="true">
+      <svg viewBox="0 0 44 44" width="44" height="44">
+        <rect x="1" y="1" width="42" height="42" rx="11" fill="url(#g)" />
+        <path d="M12 22.5 L19 29.5 L32 15.5" fill="none" stroke="#fff"
+              stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" />
+        <defs>
+          <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#3aa0ff" />
+            <stop offset="1" stop-color="#0a63c9" />
+          </linearGradient>
+        </defs>
+      </svg>
+    </div>
     <h1>iCloud Reminders</h1>
+    <p class="gate-sub">Your reminders, on Windows.</p>
 
     <div id="gate-loading" class="gate-step">
       <div class="spinner"></div>
-      <p>Connecting…</p>
+      <p class="hint centered" id="gate-loading-text">Connecting…</p>
     </div>
 
     <form id="gate-login" class="gate-step hidden">
-      <label for="apple-id">Apple ID</label>
-      <input id="apple-id" type="email" autocomplete="username" placeholder="you@icloud.com" required />
-      <label for="password">Password</label>
-      <input id="password" type="password" autocomplete="current-password" required />
-      <p class="hint">Stored in Windows Credential Manager, never on disk in the clear.</p>
-      <button type="submit" class="primary">Sign in</button>
+      <div class="field">
+        <label for="apple-id">Apple ID</label>
+        <input id="apple-id" type="email" autocomplete="username"
+               placeholder="you@icloud.com" required />
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password" required />
+      </div>
+      <button type="submit" class="primary">Sign In</button>
+      <p class="hint centered lock">
+        Stored in Windows Credential Manager. Never written to disk in the clear.
+      </p>
     </form>
 
     <form id="gate-2fa" class="gate-step hidden">
-      <label for="code">Verification code</label>
-      <input id="code" inputmode="numeric" maxlength="6" placeholder="123456" required />
-      <p class="hint">Approve the prompt on your iPhone, then type the six digits.</p>
+      <p class="hint centered">
+        Approve the prompt on your iPhone, then enter the six digits.
+      </p>
+      <input id="code" class="code-input" inputmode="numeric" maxlength="6"
+             placeholder="······" autocomplete="one-time-code" required />
       <button type="submit" class="primary">Verify</button>
+      <button type="button" id="resend-2fa" class="linkish">Send a new code</button>
     </form>
 
     <div id="gate-sidecar" class="gate-step hidden">
-      <p class="warn">The sync service isn't running.</p>
-      <p class="hint">It's a separate executable built by
-        <code>scripts\build-sidecar.ps1</code>. If you haven't run that yet,
-        run it and press Retry.</p>
+      <p class="warn centered strong">The sync service isn't running.</p>
+      <p class="hint centered">
+        It's a separate executable built by <code>scripts\build-sidecar.ps1</code>.
+        Run that, then press Retry.
+      </p>
       <pre id="sidecar-detail" class="detail-log"></pre>
       <button id="retry-sidecar" class="primary">Retry</button>
     </div>
 
     <div id="gate-terms" class="gate-step hidden">
-      <p class="warn">Apple needs you to accept updated iCloud terms before syncing.</p>
-      <p class="hint">Accept them at icloud.com, or continue to accept them here.</p>
-      <button id="accept-terms" class="primary">Accept and continue</button>
+      <p class="warn centered strong">Updated iCloud terms</p>
+      <p class="hint centered">
+        Apple needs you to accept them before syncing. You can also accept at
+        icloud.com.
+      </p>
+      <button id="accept-terms" class="primary">Accept and Continue</button>
     </div>
 
-    <p id="gate-error" class="error hidden"></p>
+    <p id="gate-error" class="error centered hidden"></p>
   </div>
 </div>
 
@@ -59,9 +87,15 @@
   <aside class="sidebar">
     <div class="sidebar-head">
       <span class="brand">Reminders</span>
-      <button id="sync-btn" class="icon-btn" title="Sync now">⟳</button>
+      <div class="head-actions">
+        <button id="sync-btn" class="icon-btn" title="Sync now">⟳</button>
+        <button id="settings-btn" class="icon-btn" title="Settings">⚙</button>
+      </div>
     </div>
 
+    <nav id="smart" class="smart"></nav>
+
+    <div class="section-label listy">Lists</div>
     <nav id="lists" class="lists"></nav>
 
     <div class="tag-section">
@@ -78,13 +112,32 @@
     <header class="list-head">
       <div class="list-title-row">
         <h2 id="list-title">Reminders</h2>
-        <button id="new-btn" class="add-btn" title="New reminder (Ctrl+N)">
-          <span aria-hidden="true">+</span>
-        </button>
+        <div class="head-actions">
+          <!-- Collapsed to an icon until used; expands in place. -->
+          <div id="search-wrap" class="search-wrap">
+            <button id="search-btn" class="icon-btn round" title="Search (Ctrl+F)">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                   stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
+                <circle cx="8.5" cy="8.5" r="5.5" />
+                <path d="M12.7 12.7 L17 17" />
+              </svg>
+            </button>
+            <div id="search-box" class="search-box">
+              <input id="search" type="search" placeholder="Search…" />
+              <button id="search-scope" class="scope-btn" title="Toggle search scope">
+                In List
+              </button>
+              <button id="search-close" class="icon-btn" title="Close search">✕</button>
+            </div>
+          </div>
+          <button id="new-btn" class="add-btn" title="New reminder (Ctrl+N)">
+            <span aria-hidden="true">+</span>
+          </button>
+        </div>
       </div>
       <div class="list-actions">
-        <input id="search" type="search" placeholder="Search…" />
         <label class="check"><input id="show-done" type="checkbox" /> Show completed</label>
+        <span id="result-note" class="hint tiny"></span>
       </div>
     </header>
 
@@ -130,6 +183,89 @@
       <button type="submit" class="primary">Add Reminder</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="settings-dialog" class="sheet wide">
+  <div class="sheet-body">
+    <h3>Settings</h3>
+
+    <div class="settings-group">
+      <div class="section-label">Appearance</div>
+      <div class="setting-row">
+        <label for="set-theme">Theme</label>
+        <select id="set-theme">
+          <option value="system">Match Windows</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="settings-group">
+      <div class="section-label">Sync</div>
+      <div class="setting-row">
+        <label for="set-sync">Sync every</label>
+        <select id="set-sync">
+          <option value="5">5 minutes</option>
+          <option value="10">10 minutes</option>
+          <option value="15">15 minutes</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label for="set-default-list">New reminders go to</label>
+        <select id="set-default-list"></select>
+      </div>
+      <div class="setting-row">
+        <label for="set-search-scope">Search</label>
+        <select id="set-search-scope">
+          <option value="list">Current list</option>
+          <option value="global">All reminders</option>
+        </select>
+      </div>
+      <button id="set-full-sync" class="ghost wide-btn">Re-download everything</button>
+    </div>
+
+    <div class="settings-group">
+      <div class="section-label">Notifications</div>
+      <label class="switch-row">
+        <span>Show due-date notifications</span>
+        <input id="set-notify" type="checkbox" />
+      </label>
+      <div class="setting-row">
+        <label for="set-stale">Missed while asleep</label>
+        <select id="set-stale">
+          <option value="30">Summarise after 30 min</option>
+          <option value="60">Summarise after 1 hour</option>
+          <option value="240">Summarise after 4 hours</option>
+        </select>
+      </div>
+      <p class="hint tiny">
+        Anything overdue by more than this collapses into one summary instead of
+        a toast each, so waking the machine doesn't flood the tray.
+      </p>
+    </div>
+
+    <div class="settings-group">
+      <div class="section-label">Windows</div>
+      <label class="switch-row">
+        <span>Start with Windows</span>
+        <input id="set-autostart" type="checkbox" />
+      </label>
+      <p class="hint tiny" id="autostart-note"></p>
+    </div>
+
+    <div class="settings-group">
+      <div class="section-label">Account</div>
+      <div class="setting-row static-row">
+        <span id="set-account" class="muted-text">—</span>
+        <button id="set-signout" class="danger small">Sign Out</button>
+      </div>
+    </div>
+
+    <div class="sheet-actions">
+      <button type="button" id="settings-close" class="primary">Done</button>
+    </div>
+  </div>
 </dialog>
 
 <div id="banner" class="banner hidden"></div>

@@ -323,6 +323,9 @@ class ICloudClient:
             rem.completed = bool(payload["completed"])
         if "flagged" in payload:
             rem.flagged = bool(payload["flagged"])
+        if "deleted" in payload:
+            # Deletion is a soft flag, so restoring is just clearing it.
+            rem.deleted = bool(payload["deleted"])
         if "due_date" in payload:
             due = payload["due_date"]
             if isinstance(due, str):

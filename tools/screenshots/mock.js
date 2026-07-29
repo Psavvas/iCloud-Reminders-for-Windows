@@ -33,6 +33,8 @@
     { id: "R/8", list_id: "List/IN", title: "Order birthday present for Nina", description: "", due_date: null, priority: 0, completed: 0, dirty: 0, tags: ["personal"] },
     { id: "R/9", list_id: "List/IN", title: "Back up the Pi before reflashing", description: "", due_date: null, priority: 0, completed: 0, dirty: 0, tags: [] },
     { id: "R/10", list_id: "List/IN", title: "Cancel TAP ticket", description: "", due_date: rel(-160), priority: 0, completed: 1, dirty: 0, tags: [] },
+    { id: "R/11", list_id: "List/IN", title: "Submit KIPR STL reg (old draft)", description: "", due_date: rel(-200), priority: 0, completed: 0, deleted: 1, dirty: 0, tags: [] },
+    { id: "R/12", list_id: "List/CHO", title: "Take out recycling", description: "", due_date: null, priority: 0, completed: 0, deleted: 1, dirty: 0, tags: [] },
   ];
 
   const TAGS = [
@@ -40,15 +42,54 @@
     { name: "school", n: 41 }, { name: "urgent", n: 4 },
   ];
 
+  const settings = {
+    theme: "system", sync_minutes: 10, notifications_enabled: true,
+    stale_after_minutes: 60, max_individual_toasts: 3,
+    default_list_id: null, search_scope: "list",
+  };
+
+  const startOfTomorrow = () => {
+    const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + 1); return d;
+  };
+
   const handlers = {
     auth_status: () => ({ authenticated: true, apple_id: "you@icloud.com", has_cache: true }),
+    settings: () => ({ ...settings }),
+    set_settings: (p) => Object.assign(settings, p),
+    smart_counts: () => {
+      const t = startOfTomorrow();
+      const live = REMINDERS.filter((r) => !r.deleted);
+      return {
+        today: live.filter((r) => !r.completed && r.due_date && new Date(r.due_date) < t).length,
+        upcoming: live.filter((r) => !r.completed && r.due_date && new Date(r.due_date) >= t).length,
+        completed: live.filter((r) => r.completed).length,
+        deleted: REMINDERS.filter((r) => r.deleted).length,
+        all: live.filter((r) => !r.completed).length,
+      };
+    },
+    restore_reminder: (p) => {
+      const r = REMINDERS.find((x) => x.id === p.id);
+      if (r) r.deleted = 0;
+      return r;
+    },
+    sign_out: () => ({ signed_out: true }),
     lists: () => LISTS,
     tags: () => TAGS,
     reminders: (p) => {
+      const t = startOfTomorrow();
       let rows = REMINDERS.slice();
+      rows = rows.filter((r) => (p.scope === "deleted" ? r.deleted : !r.deleted));
+      if (p.scope === "today") {
+        rows = rows.filter((r) => !r.completed && r.due_date && new Date(r.due_date) < t);
+      } else if (p.scope === "upcoming") {
+        rows = rows.filter((r) => !r.completed && r.due_date && new Date(r.due_date) >= t);
+      } else if (p.scope === "completed") {
+        rows = rows.filter((r) => r.completed);
+      } else if (p.scope !== "deleted" && !p.include_completed) {
+        rows = rows.filter((r) => !r.completed);
+      }
       if (p.list_id) rows = rows.filter((r) => r.list_id === p.list_id);
       if (p.tag) rows = rows.filter((r) => (r.tags || []).includes(p.tag));
-      if (!p.include_completed) rows = rows.filter((r) => !r.completed);
       if (p.search) {
         const q = p.search.toLowerCase();
         rows = rows.filter((r) => r.title.toLowerCase().includes(q));
@@ -64,6 +105,7 @@
     sync_status: () => ({
       running: false, last_sync: rel(-0.2), has_cursor: true,
       pending_pushes: 1, conflicts: window.__MOCK_CONFLICT ? 1 : 0,
+      sync_minutes: settings.sync_minutes,
     }),
     conflicts: () => (window.__MOCK_CONFLICT ? [{
       id: 1,
@@ -78,6 +120,8 @@
     core: {
       invoke: async (cmd, args) => {
         if (cmd === "sidecar_status") return { running: true, error: null, tried_paths: [] };
+        if (cmd === "get_autostart") return false;
+        if (cmd === "set_autostart") return !!(args && args.enabled);
         const { method, params } = args || {};
         const fn = handlers[method];
         if (!fn) throw JSON.stringify({ code: "NO_METHOD", message: method });
