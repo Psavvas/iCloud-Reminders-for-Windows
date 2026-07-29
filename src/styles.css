@@ -25,6 +25,20 @@
   --r-sm: 7px;
   --r-md: 10px;
   --r-lg: 14px;
+  --r-xl: 22px;
+
+  /* Liquid Glass: a translucent pane, an edge catching light, and an inner
+     specular highlight. Backdrop blur does the refracting; the app backdrop
+     behind it supplies something worth refracting. */
+  --glass: rgba(255, 255, 255, 0.55);
+  --glass-strong: rgba(255, 255, 255, 0.72);
+  --glass-edge: rgba(255, 255, 255, 0.65);
+  --glass-spec: rgba(255, 255, 255, 0.9);
+  --glass-shadow: 0 10px 34px rgba(0, 0, 0, 0.13), 0 2px 8px rgba(0, 0, 0, 0.07);
+  --blur: saturate(180%) blur(26px);
+
+  /* Set from the selected list's colour at runtime. */
+  --tint: #7f7fd5;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -45,6 +59,45 @@
     --muted: #98989d;
     --hairline: rgba(84, 84, 88, 0.65);
     --sel: rgba(120, 120, 128, 0.32);
+
+    --glass: rgba(40, 40, 44, 0.55);
+    --glass-strong: rgba(44, 44, 48, 0.72);
+    --glass-edge: rgba(255, 255, 255, 0.14);
+    --glass-spec: rgba(255, 255, 255, 0.22);
+    --glass-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
+  }
+}
+
+/* One material, reused. Edge + specular sheen are what stop it reading as
+   plain transparency. */
+.glass {
+  background: var(--glass);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-spec);
+  position: relative;
+  overflow: hidden;
+}
+/* A soft highlight raking across the top, like light catching a curved edge. */
+.glass::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 45%;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--glass-spec) 45%, transparent),
+    transparent
+  );
+  pointer-events: none;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .glass, .sidebar, .detail, .sheet, .banner {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    background: var(--panel) !important;
   }
 }
 
@@ -124,14 +177,22 @@ textarea { resize: vertical; }
   inset: 0;
   display: grid;
   place-items: center;
-  background: var(--sidebar);
+  background:
+    radial-gradient(70% 60% at 15% 0%,
+      color-mix(in srgb, var(--tint) 38%, transparent), transparent 60%),
+    radial-gradient(60% 55% at 100% 100%,
+      color-mix(in srgb, var(--blue) 22%, transparent), transparent 58%),
+    var(--sidebar);
 }
 .gate-card {
   width: 360px;
-  background: var(--panel);
-  border-radius: var(--r-lg);
+  background: var(--glass-strong);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--r-xl);
   padding: 32px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.14), 0 1px 2px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-spec);
 }
 .gate-card h1 {
   font-size: 22px;
@@ -185,12 +246,35 @@ textarea { resize: vertical; }
   display: grid;
   grid-template-columns: 246px minmax(340px, 1fr) 330px;
   height: 100vh;
+  position: relative;
+  isolation: isolate;
+}
+
+/* The wash the glass refracts. Tinted from the selected list, so switching
+   lists shifts the whole room's colour rather than just a heading. */
+.app::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(80% 65% at 8% 0%,
+      color-mix(in srgb, var(--tint) 42%, transparent), transparent 62%),
+    radial-gradient(70% 60% at 100% 100%,
+      color-mix(in srgb, var(--tint) 26%, transparent), transparent 58%),
+    radial-gradient(50% 50% at 55% 30%,
+      color-mix(in srgb, var(--blue) 12%, transparent), transparent 70%),
+    var(--bg);
+  transition: background 420ms ease;
 }
 
 /* sidebar ---------------------------------------------------------------- */
 .sidebar {
-  background: var(--sidebar);
-  border-right: 0.5px solid var(--hairline);
+  background: color-mix(in srgb, var(--glass) 92%, transparent);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border-right: 1px solid var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--glass-spec);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -301,19 +385,54 @@ textarea { resize: vertical; }
 
 /* list pane -------------------------------------------------------------- */
 .list-pane {
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 62%, transparent);
+  backdrop-filter: saturate(150%) blur(18px);
+  -webkit-backdrop-filter: saturate(150%) blur(18px);
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
 .list-head { padding: 20px 24px 10px; }
+.list-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
 .list-head h2 {
-  margin: 0 0 12px;
+  margin: 0;
   font-size: 26px;
   font-weight: 700;
   letter-spacing: -0.025em;
   color: var(--blue);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+
+/* New-reminder affordance: a glass pill instead of a permanent input row. */
+.add-btn {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  font-size: 21px;
+  line-height: 1;
+  font-weight: 300;
+  color: var(--blue);
+  background: var(--glass-strong);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-spec);
+  display: grid;
+  place-items: center;
+  padding: 0 0 2px;
+  transition: transform 140ms ease, filter 140ms ease;
+}
+.add-btn:hover { transform: scale(1.06); filter: brightness(1.05); }
+.add-btn:active { transform: scale(0.96); }
 .list-actions { display: flex; align-items: center; gap: 14px; }
 .list-actions input[type="search"] { flex: 1; border-radius: 999px; padding: 7px 14px; }
 .check {
@@ -325,13 +444,6 @@ textarea { resize: vertical; }
   white-space: nowrap;
 }
 .check input { width: auto; }
-
-.quick-add {
-  display: flex;
-  gap: 9px;
-  padding: 10px 24px 14px;
-}
-.quick-add input { border-radius: 999px; padding: 8px 14px; }
 
 .reminders {
   list-style: none;
@@ -423,9 +535,81 @@ textarea { resize: vertical; }
 
 /* detail ----------------------------------------------------------------- */
 .detail {
-  background: var(--sidebar);
-  border-left: 0.5px solid var(--hairline);
+  background: color-mix(in srgb, var(--glass) 92%, transparent);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border-left: 1px solid var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--glass-spec);
   overflow-y: auto;
+}
+.detail-body input,
+.detail-body textarea,
+.detail-body select,
+.detail-body .static {
+  background: color-mix(in srgb, var(--panel) 68%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1px solid color-mix(in srgb, var(--glass-edge) 60%, transparent);
+}
+
+/* new-reminder sheet ----------------------------------------------------- */
+.sheet {
+  width: min(430px, calc(100vw - 48px));
+  padding: 0;
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--r-xl);
+  background: var(--glass-strong);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-spec);
+  color: var(--text);
+  overflow: hidden;
+}
+.sheet::backdrop {
+  background: rgba(0, 0, 0, 0.22);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+.sheet[open] { animation: sheet-in 220ms cubic-bezier(0.22, 1, 0.36, 1); }
+@keyframes sheet-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to   { opacity: 1; transform: none; }
+}
+.sheet form { padding: 22px; }
+.sheet h3 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.sheet label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  font-weight: 600;
+  margin: 15px 2px 5px;
+}
+.sheet input,
+.sheet textarea,
+.sheet select {
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--glass-edge) 60%, transparent);
+  border-radius: var(--r-md);
+}
+.sheet .row { display: flex; gap: 8px; align-items: center; }
+.sheet-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.sheet-actions {
+  display: flex;
+  gap: 9px;
+  margin-top: 22px;
+}
+.sheet-actions button { flex: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet[open] { animation: none; }
+  .app::before { transition: none; }
 }
 .detail-body { padding: 18px 16px; }
 .detail-body label {
@@ -465,13 +649,13 @@ textarea { resize: vertical; }
   display: flex;
   align-items: center;
   gap: 11px;
-  background: color-mix(in srgb, var(--panel) 82%, transparent);
-  backdrop-filter: saturate(180%) blur(20px);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
-  border: 0.5px solid var(--hairline);
+  background: var(--glass-strong);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-edge);
   border-radius: 999px;
   padding: 10px 18px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-spec);
   max-width: 74vw;
   font-size: 13px;
 }

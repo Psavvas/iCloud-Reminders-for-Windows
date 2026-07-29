@@ -94,6 +94,18 @@ await shoot("04-conflict", {
   },
 });
 
+
+await shoot("07-new-reminder", {
+  prep: async (page) => {
+    await selectInbox(page);
+    await page.click("#new-btn");
+    await page.waitForTimeout(350);
+    await page.fill("#new-title", "Order lab safety goggles");
+    await page.fill("#new-notes", "Needed before Thursday's titration.");
+    await page.selectOption("#new-priority", "5");
+  },
+});
+
 await shoot("05-signin", {
   prep: async (page) => {
     await page.evaluate(() => {

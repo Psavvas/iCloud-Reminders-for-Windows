@@ -303,6 +303,13 @@ async function loadReminders() {
   $("list-title").style.color =
     current && current.color_hex ? current.color_hex : "";
 
+  // The glass surfaces need something behind them to refract, so the app
+  // backdrop picks up a wash of the current list's colour.
+  document.documentElement.style.setProperty(
+    "--tint",
+    (current && current.color_hex) || "#7f7fd5"
+  );
+
   const ul = $("reminders");
   ul.innerHTML = "";
   $("empty").classList.toggle("hidden", rows.length > 0);
@@ -454,20 +461,87 @@ async function showDetail(id) {
 
 // ------------------------------------------------------------------ actions
 
-$("quick-add").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const title = $("quick-title").value.trim();
-  if (!title) return;
-  const listId =
+/** The list a new reminder lands in: whatever's selected, else Inbox. */
+function defaultListId() {
+  return (
     state.selectedList ||
-    (state.lists.find((l) => l.title.toLowerCase() === "inbox") ||
+    (state.lists.find((l) => (l.title || "").toLowerCase() === "inbox") ||
       state.lists.find((l) => !l.is_group) ||
-      {}).id;
+      {}).id
+  );
+}
+
+function openNewDialog() {
+  const dlg = $("new-dialog");
+  if (!state.lists.length) return banner("No lists loaded yet.", "warn");
+
+  const listSel = $("new-list");
+  listSel.innerHTML = "";
+  for (const l of state.lists.filter((x) => !x.is_group)) {
+    const opt = document.createElement("option");
+    opt.value = l.id;
+    opt.textContent = l.title;
+    listSel.appendChild(opt);
+  }
+  listSel.value = defaultListId() || listSel.options[0]?.value;
+
+  const prioSel = $("new-priority");
+  prioSel.innerHTML = PRIORITIES.map(
+    (p) => `<option value="${p.value}">${p.label}</option>`
+  ).join("");
+  prioSel.value = "0";
+
+  $("new-title").value = "";
+  $("new-notes").value = "";
+  $("new-due").value = "";
+
+  dlg.showModal();
+  $("new-title").focus();
+}
+
+$("new-btn").addEventListener("click", openNewDialog);
+$("new-cancel").addEventListener("click", () => $("new-dialog").close());
+$("new-due-clear").addEventListener("click", () => ($("new-due").value = ""));
+
+// Clicking the backdrop dismisses, matching how Apple's sheets behave.
+$("new-dialog").addEventListener("click", (ev) => {
+  if (ev.target === $("new-dialog")) $("new-dialog").close();
+});
+
+$("new-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const title = $("new-title").value.trim();
+  if (!title) return;
+  const listId = $("new-list").value;
   if (!listId) return banner("No list to add to.", "warn");
-  await call("create_reminder", { list_id: listId, title });
-  $("quick-title").value = "";
+
+  const due = $("new-due").value;
+  $("new-dialog").close();
+
+  await call("create_reminder", {
+    list_id: listId,
+    title,
+    description: $("new-notes").value,
+    // No zone on a datetime-local value; the sidecar resolves it against the
+    // local zone rather than letting Apple read it as UTC.
+    due_date: due ? due + ":00" : null,
+    priority: Number($("new-priority").value),
+  });
   await loadReminders();
   await loadLists();
+});
+
+// Ctrl+N anywhere, and "n" when not typing into something.
+document.addEventListener("keydown", (ev) => {
+  const dlg = $("new-dialog");
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "n") {
+    ev.preventDefault();
+    if (!dlg.open) openNewDialog();
+  } else if (ev.key === "n" && !typing && !dlg.open && !$("app").classList.contains("hidden")) {
+    ev.preventDefault();
+    openNewDialog();
+  }
 });
 
 $("search").addEventListener("input", (e) => {

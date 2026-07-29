@@ -76,17 +76,17 @@
 
   <main class="list-pane">
     <header class="list-head">
-      <h2 id="list-title">Reminders</h2>
+      <div class="list-title-row">
+        <h2 id="list-title">Reminders</h2>
+        <button id="new-btn" class="add-btn" title="New reminder (Ctrl+N)">
+          <span aria-hidden="true">+</span>
+        </button>
+      </div>
       <div class="list-actions">
         <input id="search" type="search" placeholder="Search…" />
         <label class="check"><input id="show-done" type="checkbox" /> Show completed</label>
       </div>
     </header>
-
-    <form id="quick-add" class="quick-add">
-      <input id="quick-title" placeholder="Add a reminder…" autocomplete="off" />
-      <button type="submit" class="primary">Add</button>
-    </form>
 
     <ul id="reminders" class="reminders"></ul>
     <p id="empty" class="empty hidden">Nothing here.</p>
@@ -96,6 +96,41 @@
     <p class="empty">Select a reminder.</p>
   </section>
 </div>
+
+<!-- New reminder. A <dialog> gives Esc-to-close and focus trapping for free. -->
+<dialog id="new-dialog" class="sheet">
+  <form id="new-form" method="dialog">
+    <h3>New Reminder</h3>
+
+    <label for="new-title">Title</label>
+    <input id="new-title" autocomplete="off" placeholder="What needs doing?" required />
+
+    <label for="new-notes">Notes</label>
+    <textarea id="new-notes" rows="3" placeholder="Optional"></textarea>
+
+    <div class="sheet-grid">
+      <div>
+        <label for="new-list">List</label>
+        <select id="new-list"></select>
+      </div>
+      <div>
+        <label for="new-priority">Priority</label>
+        <select id="new-priority"></select>
+      </div>
+    </div>
+
+    <label for="new-due">Due</label>
+    <div class="row">
+      <input id="new-due" type="datetime-local" />
+      <button type="button" id="new-due-clear" class="ghost">Clear</button>
+    </div>
+
+    <div class="sheet-actions">
+      <button type="button" id="new-cancel" class="ghost">Cancel</button>
+      <button type="submit" class="primary">Add Reminder</button>
+    </div>
+  </form>
+</dialog>
 
 <div id="banner" class="banner hidden"></div>
 
