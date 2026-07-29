@@ -46,6 +46,8 @@
     theme: "system", sync_minutes: 10, notifications_enabled: true,
     stale_after_minutes: 60, max_individual_toasts: 3,
     default_list_id: null, search_scope: "list",
+    onboarded: true, print_group_by: "due",
+    print_include_notes: true, print_include_completed: false,
   };
 
   const startOfTomorrow = () => {

@@ -18,3 +18,13 @@ so neither may be left behind.
 
 Screenshots use whatever fonts the host has. Without SF Pro or Segoe UI
 Variable the type falls back, so spacing can differ slightly from Windows.
+
+## Print layout
+
+```bash
+npm run print       # writes docs/screenshots/print-preview.pdf
+```
+
+Builds the print view through the real `@media print` stylesheet and renders it
+to PDF, so the paper layout can be checked without a printer — page breaks,
+grouping, and the hand-tickable boxes included.

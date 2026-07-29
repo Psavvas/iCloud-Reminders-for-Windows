@@ -90,9 +90,11 @@ up a sidecar edit — the shell respawns it, no PyInstaller run involved.
 
 ## Using it
 
-First launch asks for your Apple ID and password, then a 2FA code. The password
-goes to Windows Credential Manager via `keyring`; the session persists, so
-subsequent launches skip both.
+First launch asks for your Apple ID and password, then a 2FA code, then walks
+through a short setup: what stays running in the tray, notifications and
+start-with-Windows, and the two things Apple will not allow — so they are known
+up front rather than discovered later. The password goes to Windows Credential
+Manager via `keyring`; the session persists, so subsequent launches skip both.
 
 Closing the window hides it to the tray — the scheduler has to keep running for
 due-date toasts to be worth anything. Quit from the tray menu.
@@ -105,8 +107,10 @@ due-date toasts to be worth anything. Quit from the tray menu.
 | Title, notes, due date, priority | Read/write |
 | Tags | **Read and filter only** |
 | Creating, renaming, deleting lists | **Not supported** |
-| Background sync | Delta cursor, every 10 minutes |
+| Background sync | Delta cursor, every 5–15 minutes |
 | Due-date notifications | 30s tick, Windows toast |
+| Smart lists | Today, Upcoming, All, Completed, Deleted |
+| Printing | Any view, grouped by due date, priority or list |
 
 The two gaps are Apple's, not oversights. Phase 1 established both against a
 live account:
@@ -139,6 +143,12 @@ conflict rather than forced: the iCloud copy wins in the cache so the UI matches
 reality, and your version is preserved and offered back. This matters because
 the phone was observed *replacing* a reminder's tag list wholesale rather than
 merging.
+
+**Printing.** Any view prints, including a search or a smart list. Rows are
+grouped — by due date into Overdue / Today / Tomorrow / This week / This month /
+Later, or by priority or list — and each gets an empty square to tick off by
+hand. Notes and completed items are optional. `break-inside: avoid` keeps a
+reminder from splitting across a page.
 
 **Lists on every sync.** `iter_changes()` only ever reports reminders, so a
 renamed or deleted list would never appear through the delta cursor. Lists are

@@ -471,6 +471,10 @@ class Cache:
             "max_individual_toasts": 3,
             "default_list_id": None,
             "search_scope": "list",         # list | global
+            "onboarded": False,
+            "print_group_by": "due",        # due | priority | none
+            "print_include_notes": True,
+            "print_include_completed": False,
         }
         raw = self.get_meta("settings")
         if raw:

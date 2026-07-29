@@ -140,6 +140,35 @@ await shoot("11-settings", {
   },
 });
 
+
+await shoot("12-onboarding", {
+  prep: async (page) => {
+    await page.evaluate(() => { window.startOnboarding && window.startOnboarding(); });
+    await page.evaluate(() => {
+      document.getElementById("onboard").classList.remove("hidden");
+      document.querySelectorAll(".onboard-step").forEach((el) =>
+        el.classList.toggle("hidden", el.dataset.step !== "2")
+      );
+      const dots = document.getElementById("onboard-dots");
+      dots.innerHTML = "";
+      for (let i = 0; i < 4; i++) {
+        const d = document.createElement("span");
+        d.className = "dot-pip" + (i === 2 ? " on" : "");
+        dots.appendChild(d);
+      }
+    });
+    await page.waitForTimeout(300);
+  },
+});
+
+await shoot("13-print-options", {
+  prep: async (page) => {
+    await selectInbox(page);
+    await page.click("#print-btn");
+    await page.waitForTimeout(320);
+  },
+});
+
 await shoot("05-signin", {
   prep: async (page) => {
     await page.evaluate(() => {

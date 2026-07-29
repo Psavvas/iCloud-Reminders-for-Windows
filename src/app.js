@@ -249,6 +249,7 @@ async function enterApp() {
   $("gate").classList.add("hidden");
   $("app").classList.remove("hidden");
   await refreshAll();
+  if (!state.settings.onboarded) await startOnboarding();
 }
 
 // ------------------------------------------------------------------ render
@@ -654,6 +655,227 @@ $("new-form").addEventListener("submit", async (ev) => {
   await loadLists();
 });
 
+
+// -------------------------------------------------------------- onboarding
+
+const ONBOARD_STEPS = 4;
+let onboardStep = 0;
+
+function renderOnboardDots() {
+  const dots = $("onboard-dots");
+  dots.innerHTML = "";
+  for (let i = 0; i < ONBOARD_STEPS; i++) {
+    const d = document.createElement("span");
+    d.className = "dot-pip" + (i === onboardStep ? " on" : "");
+    dots.appendChild(d);
+  }
+  $("onboard-next").textContent =
+    onboardStep === ONBOARD_STEPS - 1 ? "Get Started" : "Continue";
+  $("onboard-skip").classList.toggle("hidden", onboardStep === ONBOARD_STEPS - 1);
+}
+
+function showOnboardStep(i) {
+  onboardStep = Math.max(0, Math.min(ONBOARD_STEPS - 1, i));
+  for (const el of document.querySelectorAll(".onboard-step")) {
+    el.classList.toggle("hidden", Number(el.dataset.step) !== onboardStep);
+  }
+  renderOnboardDots();
+}
+
+async function startOnboarding() {
+  $("onboard").classList.remove("hidden");
+  showOnboardStep(0);
+
+  $("onboard-notify").checked = state.settings.notifications_enabled !== false;
+  try {
+    $("onboard-autostart").checked = await invoke("get_autostart");
+  } catch {
+    $("onboard-autostart").disabled = true;
+  }
+}
+
+async function finishOnboarding() {
+  $("onboard").classList.add("hidden");
+  await saveSettings({ onboarded: true });
+}
+
+$("onboard-next").addEventListener("click", async () => {
+  if (onboardStep === ONBOARD_STEPS - 1) return finishOnboarding();
+  showOnboardStep(onboardStep + 1);
+});
+$("onboard-skip").addEventListener("click", finishOnboarding);
+
+$("onboard-notify").addEventListener("change", (e) =>
+  saveSettings({ notifications_enabled: e.target.checked })
+);
+$("onboard-autostart").addEventListener("change", async (e) => {
+  try {
+    e.target.checked = await invoke("set_autostart", { enabled: e.target.checked });
+  } catch {
+    e.target.checked = !e.target.checked;
+    e.target.disabled = true;
+  }
+});
+
+// ------------------------------------------------------------------- print
+
+const PRINT_GROUPS = {
+  due: {
+    label: "due date",
+    /** Buckets a reminder relative to the local day, like the list view does. */
+    of(r) {
+      if (!r.due_date) return { key: "9", label: "No due date" };
+      const d = new Date(r.due_date);
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      const day = 86400000;
+      const diff = Math.floor((d - start) / day);
+      if (diff < 0) return { key: "0", label: "Overdue" };
+      if (diff === 0) return { key: "1", label: "Today" };
+      if (diff === 1) return { key: "2", label: "Tomorrow" };
+      if (diff < 7) return { key: "3", label: "This week" };
+      if (diff < 30) return { key: "4", label: "This month" };
+      return { key: "5", label: "Later" };
+    },
+  },
+  priority: {
+    label: "priority",
+    of(r) {
+      const p = Number(r.priority) || 0;
+      return (
+        { 1: { key: "0", label: "High" }, 5: { key: "1", label: "Medium" },
+          9: { key: "2", label: "Low" } }[p] || { key: "3", label: "No priority" }
+      );
+    },
+  },
+  list: {
+    label: "list",
+    of(r) {
+      const l = state.lists.find((x) => x.id === r.list_id);
+      return { key: (l && l.title) || "zzz", label: (l && l.title) || "Unknown list" };
+    },
+  },
+  none: { label: "current order", of: () => ({ key: "", label: "" }) },
+};
+
+function openPrintDialog() {
+  const s = state.settings;
+  $("print-group").value = s.print_group_by || "due";
+  $("print-notes").checked = s.print_include_notes !== false;
+  $("print-completed").checked = !!s.print_include_completed;
+  $("print-summary").textContent = `Printing “${currentTitle().text}”.`;
+  $("print-dialog").showModal();
+}
+
+$("print-btn").addEventListener("click", openPrintDialog);
+$("print-cancel").addEventListener("click", () => $("print-dialog").close());
+$("print-dialog").addEventListener("click", (ev) => {
+  if (ev.target === $("print-dialog")) $("print-dialog").close();
+});
+
+$("print-go").addEventListener("click", async () => {
+  const groupBy = $("print-group").value;
+  const notes = $("print-notes").checked;
+  const completed = $("print-completed").checked;
+  $("print-dialog").close();
+  await saveSettings({
+    print_group_by: groupBy,
+    print_include_notes: notes,
+    print_include_completed: completed,
+  });
+  await buildPrintView({ groupBy, notes, completed });
+  // Give the layout a frame to settle before the print dialog snapshots it.
+  requestAnimationFrame(() => setTimeout(() => window.print(), 60));
+});
+
+/**
+ * Render the current view into #print-view.
+ *
+ * Re-queries rather than scraping the DOM, because printing usually wants a
+ * different set than the screen is showing -- completed items in particular.
+ */
+async function buildPrintView({ groupBy, notes, completed }) {
+  const globalSearch = state.search && state.searchScope === "global";
+  const params = { include_completed: completed, search: state.search || null };
+  if (!globalSearch) {
+    params.list_id = state.selectedList;
+    params.tag = state.selectedTag;
+    params.scope = state.scope;
+  }
+  const rows = await call("reminders", params);
+
+  const title = globalSearch ? "All Reminders" : currentTitle().text;
+  const grouper = PRINT_GROUPS[groupBy] || PRINT_GROUPS.due;
+
+  const groups = new Map();
+  for (const r of rows) {
+    const g = grouper.of(r);
+    const bucket = groups.get(g.key) || { label: g.label, items: [] };
+    bucket.items.push(r);
+    groups.set(g.key, bucket);
+  }
+  const ordered = [...groups.entries()].sort((a, b) =>
+    String(a[0]).localeCompare(String(b[0]), undefined, { numeric: true })
+  );
+
+  const esc = (t) =>
+    String(t ?? "").replace(/[&<>"]/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
+    );
+
+  const printedOn = new Date().toLocaleString(undefined, {
+    dateStyle: "long",
+    timeStyle: "short",
+  });
+
+  let html = `
+    <header class="pv-head">
+      <h1>${esc(title)}</h1>
+      <div class="pv-meta">
+        <span>${rows.length} reminder${rows.length === 1 ? "" : "s"}</span>
+        <span>Grouped by ${esc(grouper.label)}</span>
+        <span>${esc(printedOn)}</span>
+      </div>
+    </header>`;
+
+  if (!rows.length) {
+    html += `<p class="pv-empty">Nothing to print.</p>`;
+  }
+
+  for (const [, group] of ordered) {
+    if (group.label) html += `<h2 class="pv-group">${esc(group.label)}</h2>`;
+    html += `<ul class="pv-list">`;
+    for (const r of group.items) {
+      const marks = priorityMarks(r.priority);
+      const bits = [];
+      if (r.due_date) bits.push(esc(formatDue(r.due_date)));
+      if (marks) bits.push(`${esc(priorityLabel(r.priority))} priority`);
+      if (groupBy !== "list") {
+        const l = state.lists.find((x) => x.id === r.list_id);
+        if (l && !state.selectedList) bits.push(esc(l.title));
+      }
+      for (const t of r.tags || []) bits.push("#" + esc(t));
+
+      html += `
+        <li class="pv-item${r.completed ? " done" : ""}">
+          <span class="pv-box${r.completed ? " ticked" : ""}"></span>
+          <div class="pv-body">
+            <div class="pv-title">${esc(r.title || "(untitled)")}</div>
+            ${bits.length ? `<div class="pv-sub">${bits.join(" · ")}</div>` : ""}
+            ${
+              notes && r.description
+                ? `<div class="pv-notes">${esc(r.description)}</div>`
+                : ""
+            }
+          </div>
+        </li>`;
+    }
+    html += `</ul>`;
+  }
+
+  $("print-view").innerHTML = html;
+}
+
 // ----------------------------------------------------------------- settings
 
 async function openSettings() {
@@ -805,6 +1027,9 @@ document.addEventListener("keydown", (ev) => {
   } else if (mod && ev.key.toLowerCase() === "f") {
     ev.preventDefault();
     if (inApp) openSearch();
+  } else if (mod && ev.key.toLowerCase() === "p") {
+    ev.preventDefault();
+    if (inApp && !$("print-dialog").open) openPrintDialog();
   } else if (mod && ev.key === ",") {
     ev.preventDefault();
     if (inApp && !settings.open) openSettings();
@@ -868,11 +1093,23 @@ async function showConflicts() {
 
 listen("sidecar://sync_finished", async () => {
   await refreshAll();
+  const line = $("onboard-sync-line");
+  if (line) {
+    const n = Object.values(state.counts || {}).length ? state.counts.all : null;
+    line.textContent = n
+      ? `${n} reminders across ${state.lists.length} lists — ready.`
+      : "Your reminders are ready.";
+  }
+  const done = $("onboard-done-line");
+  if (done) done.textContent = `Signed in as ${state.appleId || "your Apple ID"}.`;
 });
 listen("sidecar://sync_progress", (e) => {
   const d = e.payload || {};
   if (d.stage === "reminders") {
-    $("sync-status").textContent = `Syncing ${d.index}/${d.of} — ${d.total} reminders`;
+    const msg = `Syncing ${d.index}/${d.of} — ${d.total} reminders`;
+    $("sync-status").textContent = msg;
+    const line = $("onboard-sync-line");
+    if (line) line.textContent = `Downloading — ${d.total} reminders so far…`;
   }
 });
 listen("sidecar://sync_error", (e) => {

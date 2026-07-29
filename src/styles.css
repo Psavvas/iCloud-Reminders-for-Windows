@@ -760,3 +760,214 @@ code {
   .search-box { transition: none; }
   .sheet .switch-row input[type="checkbox"]::after { transition: none; }
 }
+
+/* onboarding ------------------------------------------------------------- */
+.onboard {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.32);
+}
+.onboard-card {
+  width: min(460px, calc(100vw - 48px));
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  animation: sheet-in 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.onboard-steps { padding: 34px 32px 8px; min-height: 316px; }
+.onboard-step { animation: fade-in 200ms ease; }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+.onboard-art { display: grid; place-items: center; margin-bottom: 16px; }
+.onboard-step h2 {
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0 0 10px;
+  text-align: center;
+}
+.onboard-step > p {
+  color: var(--text-2);
+  font-size: 13.5px;
+  line-height: 1.5;
+  margin: 0 0 12px;
+  text-align: center;
+}
+.onboard-step > p.hint { color: var(--muted); }
+.onboard-list {
+  margin: 14px 0 10px;
+  padding-left: 20px;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.onboard-list li { margin-bottom: 9px; }
+.onboard-list.compact li { margin-bottom: 5px; }
+.onboard-list strong { color: var(--text); }
+kbd {
+  font: 11px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  background: var(--fill);
+  border: 1px solid var(--hairline);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 1px 5px;
+  letter-spacing: 0;
+}
+.onboard-switch { margin: 12px 0 !important; }
+.sheet .onboard-switch, .onboard-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 13.5px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.onboard-switch input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 42px;
+  height: 25px;
+  border-radius: 999px;
+  background: var(--fill-2);
+  position: relative;
+  flex: none;
+  cursor: pointer;
+  transition: background 160ms ease;
+  padding: 0;
+}
+.onboard-switch input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 21px; height: 21px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.onboard-switch input[type="checkbox"]:checked { background: var(--green); }
+.onboard-switch input[type="checkbox"]:checked::after { transform: translateX(17px); }
+.onboard-switch input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.onboard-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 32px 24px;
+}
+.dots { display: flex; gap: 6px; }
+.dot-pip {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fill-2);
+  transition: background 160ms ease, transform 160ms ease;
+}
+.dot-pip.on { background: var(--blue); transform: scale(1.15); }
+.onboard-actions { display: flex; align-items: center; gap: 6px; }
+button.linkish.inline { width: auto; padding: 8px 12px; }
+
+/* print ------------------------------------------------------------------ */
+
+/* Off-screen rather than display:none, so layout is measured before printing. */
+.print-view {
+  position: absolute;
+  left: -10000px;
+  top: 0;
+  width: 190mm;
+}
+
+@media print {
+  /* Only the print view goes on paper. */
+  #app, #gate, #banner, #onboard, dialog { display: none !important; }
+
+  html, body {
+    background: #fff;
+    color: #000;
+    overflow: visible;
+    height: auto;
+    font-size: 10.5pt;
+  }
+
+  .print-view {
+    position: static;
+    left: auto;
+    width: auto;
+  }
+
+  @page { margin: 16mm 14mm; }
+
+  .pv-head {
+    border-bottom: 1.5pt solid #000;
+    padding-bottom: 6pt;
+    margin-bottom: 12pt;
+  }
+  .pv-head h1 {
+    font-size: 19pt;
+    margin: 0 0 3pt;
+    letter-spacing: -0.02em;
+  }
+  .pv-meta {
+    display: flex;
+    gap: 12pt;
+    font-size: 8.5pt;
+    color: #555;
+  }
+  .pv-meta span::after { content: ""; }
+
+  /* Keep a heading with at least the first rows under it. */
+  .pv-group {
+    font-size: 11pt;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #333;
+    margin: 14pt 0 5pt;
+    padding-bottom: 2pt;
+    border-bottom: 0.5pt solid #bbb;
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+  .pv-list { list-style: none; margin: 0; padding: 0; }
+
+  .pv-item {
+    display: flex;
+    gap: 7pt;
+    align-items: flex-start;
+    padding: 3.5pt 0;
+    border-bottom: 0.25pt solid #ddd;
+    /* A reminder split across a page break is unreadable. */
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  /* An empty square to tick off by hand -- the point of printing a list. */
+  .pv-box {
+    flex: none;
+    width: 9pt;
+    height: 9pt;
+    margin-top: 1.5pt;
+    border: 0.75pt solid #444;
+    border-radius: 1.5pt;
+  }
+  .pv-box.ticked { background: #444; }
+  .pv-body { flex: 1; min-width: 0; }
+  .pv-title { font-size: 10.5pt; line-height: 1.3; }
+  .pv-item.done .pv-title { color: #777; text-decoration: line-through; }
+  .pv-sub { font-size: 8.5pt; color: #555; margin-top: 1pt; }
+  .pv-notes {
+    font-size: 8.5pt;
+    color: #444;
+    margin-top: 2pt;
+    padding-left: 6pt;
+    border-left: 1pt solid #ddd;
+    white-space: pre-wrap;
+  }
+  .pv-empty { color: #666; font-style: italic; }
+}
