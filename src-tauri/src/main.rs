@@ -117,7 +117,16 @@ async fn start_sidecar(app: AppHandle) -> Result<Arc<Sidecar>, String> {
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| PathBuf::from("."));
-    let args = vec!["--data-dir".to_string(), data_dir.display().to_string()];
+
+    // REMINDERS_SIDECAR_ARGS lets a dev run the sidecar straight from source --
+    // point REMINDERS_SIDECAR at python.exe and pass "-m reminders_sidecar" --
+    // instead of re-freezing with PyInstaller after every edit.
+    let mut args: Vec<String> = std::env::var("REMINDERS_SIDECAR_ARGS")
+        .ok()
+        .map(|s| s.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default();
+    args.push("--data-dir".to_string());
+    args.push(data_dir.display().to_string());
 
     match Sidecar::spawn(app.clone(), path.clone(), args).await {
         Ok(sc) => {

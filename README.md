@@ -48,13 +48,40 @@ npm run build                   # produces the installer
 
 The installer lands in `src-tauri\target\release\bundle\`.
 
-For development:
+### Seeing a change
+
+`git pull` on its own changes nothing you can run — the frontend is bundled
+into the exe, the Rust is compiled, and the sidecar is frozen. What you have to
+rebuild depends on what changed:
+
+| Changed | Installed build | `npm run dev` |
+|---|---|---|
+| `src/` (HTML, CSS, JS) | `npm run build`, reinstall | reload the window (Ctrl+R) |
+| `src-tauri/` (Rust) | `npm run build`, reinstall | recompiles on save |
+| `sidecar/` (Python) | `.\scripts\build-sidecar.ps1`, then `npm run build` | see below |
+| `src-tauri/icons/` | `python scripts/make_icons.py`, rebuild, reinstall | — |
+
+So a pull that touches everything means the full three steps again.
+
+### Development
 
 ```powershell
 .\scripts\build-sidecar.ps1
 $env:REMINDERS_SIDECAR = "$PWD\dist-sidecar\reminders-sidecar.exe"
 npm run dev
 ```
+
+To iterate on the sidecar without re-freezing it every time, run it from source
+instead:
+
+```powershell
+$env:REMINDERS_SIDECAR = "$PWD\.venv\Scripts\python.exe"
+$env:REMINDERS_SIDECAR_ARGS = "-m reminders_sidecar"
+npm run dev
+```
+
+That needs `pip install -e ./sidecar` in the venv once. Restart the app to pick
+up a sidecar edit — the shell respawns it, no PyInstaller run involved.
 
 > **Toasts will not appear under `npm run dev`.** Windows only delivers
 > notifications for an application with a registered AppUserModelID, which is
