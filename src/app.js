@@ -95,11 +95,41 @@ function gateError(msg) {
 function parseError(e) {
   try {
     const o = typeof e === "string" ? JSON.parse(e) : e;
-    return { code: o.code || "ERROR", message: o.message || String(e) };
+    return {
+      code: o.code || "ERROR",
+      message: o.message || String(e),
+      detail: o.detail || "",
+    };
   } catch {
-    return { code: "ERROR", message: String(e) };
+    return { code: "ERROR", message: String(e), detail: "" };
   }
 }
+
+/** Render the "sidecar isn't running" gate, including where we looked. */
+async function showSidecarDown(detail) {
+  showStep("gate-sidecar");
+  let text = detail || "";
+  try {
+    const st = await invoke("sidecar_status");
+    if (st.error) text = st.error;
+    if (st.tried_paths && st.tried_paths.length) {
+      text += "\n\nLooked in:\n" + st.tried_paths.join("\n");
+    }
+  } catch {
+    /* status is best-effort; the detail we already have still helps */
+  }
+  $("sidecar-detail").textContent = text.trim();
+}
+
+$("retry-sidecar").addEventListener("click", async () => {
+  showStep("gate-loading");
+  try {
+    await invoke("restart_sidecar");
+    await boot();
+  } catch (e) {
+    await showSidecarDown(String(e));
+  }
+});
 
 async function boot() {
   try {
@@ -115,8 +145,10 @@ async function boot() {
     showStep("gate-login");
     if (st.apple_id) $("apple-id").value = st.apple_id;
   } catch (e) {
+    const err = parseError(e);
+    if (err.code === "SIDECAR_DOWN") return showSidecarDown(err.detail || err.message);
     showStep("gate-login");
-    gateError(parseError(e).message);
+    gateError(err.message);
   }
 }
 
@@ -131,12 +163,14 @@ $("gate-login").addEventListener("submit", async (ev) => {
     });
     enterApp();
   } catch (e) {
-    const { code, message } = parseError(e);
+    const { code, message, detail } = parseError(e);
     if (code === "2FA_REQUIRED") {
       try { await call("request_2fa"); } catch { /* code may already be sent */ }
       showStep("gate-2fa");
     } else if (code === "TERMS_REQUIRED") {
       showStep("gate-terms");
+    } else if (code === "SIDECAR_DOWN") {
+      await showSidecarDown(detail || message);
     } else {
       showStep("gate-login");
       gateError(message);
@@ -508,9 +542,21 @@ listen("sidecar://sync_error", (e) => {
   }
 });
 listen("sidecar://conflict", () => refreshSyncStatus());
-listen("sidecar://died", () =>
-  banner("The sync service stopped. Restart the app.", "warn", 0)
-);
+listen("sidecar://died", (e) => {
+  const err = (e.payload || {}).error || "";
+  // If we never got past the gate, show the actionable panel rather than a
+  // banner the user cannot do anything about.
+  if (!$("app").classList.contains("hidden")) {
+    banner("The sync service stopped. Reconnecting…", "warn", 0);
+  } else {
+    showSidecarDown(err);
+  }
+});
+listen("sidecar://ready", () => boot());
+listen("sidecar://restarted", () => {
+  banner("Sync service reconnected.", "ok", 3000);
+  boot();
+});
 listen("app://notified", () => loadReminders());
 
 setInterval(refreshSyncStatus, 15000);

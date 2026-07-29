@@ -311,3 +311,23 @@ input:focus, textarea:focus, select:focus {
 }
 .banner.warn { border-color: var(--warn); }
 .banner.ok { border-color: var(--ok); }
+
+.detail-log {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font: 11px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 170px;
+  overflow-y: auto;
+  margin: 10px 0 0;
+}
+code {
+  font: 12px ui-monospace, "Cascadia Mono", Consolas, monospace;
+  background: var(--panel-2);
+  padding: 1px 4px;
+  border-radius: 3px;
+}

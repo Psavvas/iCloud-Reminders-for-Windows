@@ -34,6 +34,15 @@
       <button type="submit" class="primary">Verify</button>
     </form>
 
+    <div id="gate-sidecar" class="gate-step hidden">
+      <p class="warn">The sync service isn't running.</p>
+      <p class="hint">It's a separate executable built by
+        <code>scripts\build-sidecar.ps1</code>. If you haven't run that yet,
+        run it and press Retry.</p>
+      <pre id="sidecar-detail" class="detail-log"></pre>
+      <button id="retry-sidecar" class="primary">Retry</button>
+    </div>
+
     <div id="gate-terms" class="gate-step hidden">
       <p class="warn">Apple needs you to accept updated iCloud terms before syncing.</p>
       <p class="hint">Accept them at icloud.com, or continue to accept them here.</p>

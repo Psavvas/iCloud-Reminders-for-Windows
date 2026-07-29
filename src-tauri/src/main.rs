@@ -10,14 +10,14 @@
 mod sidecar;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
-use tokio::time::{interval, Duration};
+use tokio::time::{interval, sleep, Duration};
 
 use crate::sidecar::Sidecar;
 
@@ -28,13 +28,116 @@ const TICK_SECONDS: u64 = 30;
 /// Background sync cadence, inside the 5-15 minute band from the brief.
 const SYNC_SECONDS: u64 = 10 * 60;
 
+/// The sidecar handle is optional and replaceable. If it fails to start we
+/// still manage state, so commands return a diagnosable error rather than
+/// Tauri's "state not managed", and the user can retry without reinstalling.
 struct AppState {
-    sidecar: Arc<Sidecar>,
+    sidecar: Mutex<Option<Arc<Sidecar>>>,
+    last_error: Mutex<Option<String>>,
+    tried_paths: Mutex<Vec<String>>,
+}
+
+impl AppState {
+    fn get(&self) -> Option<Arc<Sidecar>> {
+        self.sidecar.lock().ok().and_then(|g| g.clone())
+    }
+
+    fn set(&self, sc: Option<Arc<Sidecar>>) {
+        if let Ok(mut g) = self.sidecar.lock() {
+            *g = sc;
+        }
+    }
+
+    fn set_error(&self, err: Option<String>) {
+        if let Ok(mut g) = self.last_error.lock() {
+            *g = err;
+        }
+    }
+}
+
+/// Everywhere the sidecar could reasonably live, most specific first.
+///
+/// Installed builds get it from the resource dir; `tauri dev` may not stage
+/// resources, so the repo's dist-sidecar is checked too. The env var overrides
+/// everything, which is what the dev instructions in the README use.
+fn candidate_paths(app: &AppHandle) -> Vec<PathBuf> {
+    let exe_name = if cfg!(windows) {
+        "reminders-sidecar.exe"
+    } else {
+        "reminders-sidecar"
+    };
+    let mut out = Vec::new();
+
+    if let Ok(p) = std::env::var("REMINDERS_SIDECAR") {
+        if !p.trim().is_empty() {
+            out.push(PathBuf::from(p));
+        }
+    }
+    if let Ok(dir) = app.path().resource_dir() {
+        out.push(dir.join(exe_name));
+        // `resources` globs can land in a subdirectory named after the source.
+        out.push(dir.join("dist-sidecar").join(exe_name));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            out.push(dir.join(exe_name));
+            // Dev: target\debug\ -> repo root\dist-sidecar\
+            for up in [2usize, 3] {
+                let mut d = dir.to_path_buf();
+                for _ in 0..up {
+                    d.pop();
+                }
+                out.push(d.join("dist-sidecar").join(exe_name));
+            }
+        }
+    }
+    out.push(PathBuf::from("dist-sidecar").join(exe_name));
+    out
+}
+
+async fn start_sidecar(app: AppHandle) -> Result<Arc<Sidecar>, String> {
+    let state = app.state::<AppState>();
+    let candidates = candidate_paths(&app);
+
+    let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
+    if let Ok(mut g) = state.tried_paths.lock() {
+        *g = tried.clone();
+    }
+
+    let found = candidates.iter().find(|p| p.exists());
+    let Some(path) = found else {
+        return Err(format!(
+            "Could not find the sync service. Run scripts\\build-sidecar.ps1 to build it.\n\nLooked in:\n{}",
+            tried.join("\n")
+        ));
+    };
+
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let args = vec!["--data-dir".to_string(), data_dir.display().to_string()];
+
+    match Sidecar::spawn(app.clone(), path.clone(), args).await {
+        Ok(sc) => {
+            // Prove it actually answers before declaring success: a frozen exe
+            // that starts and immediately dies would otherwise look healthy.
+            match sc.call("ping", json!({})).await {
+                Ok(_) => Ok(sc),
+                Err(e) => Err(format!(
+                    "The sync service started but did not respond ({e}).\nPath: {}",
+                    path.display()
+                )),
+            }
+        }
+        Err(e) => Err(format!(
+            "Could not start the sync service: {e:#}\nPath: {}",
+            path.display()
+        )),
+    }
 }
 
 // ---------------------------------------------------------------- commands --
-// Thin pass-throughs. Keeping the sidecar's method names lets the frontend and
-// the protocol stay in step without a translation layer in between.
 
 #[tauri::command]
 async fn call(
@@ -63,10 +166,50 @@ async fn call(
     if !ALLOWED.contains(&method.as_str()) {
         return Err(format!("method {method} is not exposed to the UI"));
     }
-    state
-        .sidecar
-        .call(&method, params.unwrap_or(json!({})))
-        .await
+
+    let Some(sc) = state.get() else {
+        let detail = state
+            .last_error
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| "The sync service is not running.".into());
+        // Shaped like the sidecar's own errors so the UI has one code path.
+        return Err(json!({
+            "code": "SIDECAR_DOWN",
+            "message": "The sync service is not running.",
+            "detail": detail,
+        })
+        .to_string());
+    };
+
+    sc.call(&method, params.unwrap_or(json!({}))).await
+}
+
+#[tauri::command]
+fn sidecar_status(state: State<'_, AppState>) -> Value {
+    json!({
+        "running": state.get().is_some(),
+        "error": state.last_error.lock().ok().and_then(|g| g.clone()),
+        "tried_paths": state.tried_paths.lock().ok().map(|g| g.clone()).unwrap_or_default(),
+    })
+}
+
+#[tauri::command]
+async fn restart_sidecar(app: AppHandle) -> Result<Value, String> {
+    let state = app.state::<AppState>();
+    state.set(None);
+    match start_sidecar(app.clone()).await {
+        Ok(sc) => {
+            state.set(Some(sc));
+            state.set_error(None);
+            Ok(json!({ "running": true }))
+        }
+        Err(e) => {
+            state.set_error(Some(e.clone()));
+            Err(e)
+        }
+    }
 }
 
 // ----------------------------------------------------------------- timers --
@@ -77,11 +220,14 @@ async fn call(
 /// sleeping machine into one summary) and marks those reminders notified in the
 /// same call, so a crash between deciding and showing costs one toast rather
 /// than looping.
-async fn notification_loop(app: AppHandle, sidecar: Arc<Sidecar>) {
+async fn notification_loop(app: AppHandle) {
     let mut ticker = interval(Duration::from_secs(TICK_SECONDS));
     loop {
         ticker.tick().await;
-        let plan = match sidecar.call("due_notifications", json!({})).await {
+        let Some(sc) = app.state::<AppState>().get() else {
+            continue; // sidecar down; the UI is already telling the user
+        };
+        let plan = match sc.call("due_notifications", json!({})).await {
             Ok(p) => p,
             Err(e) => {
                 log::warn!("due_notifications failed: {e}");
@@ -106,16 +252,33 @@ async fn notification_loop(app: AppHandle, sidecar: Arc<Sidecar>) {
 
 /// Background delta sync. Failures are logged and retried next tick; the UI
 /// keeps serving the cache regardless.
-async fn sync_loop(app: AppHandle, sidecar: Arc<Sidecar>) {
+async fn sync_loop(app: AppHandle) {
     let mut ticker = interval(Duration::from_secs(SYNC_SECONDS));
     loop {
         ticker.tick().await;
-        match sidecar.call("sync", json!({})).await {
-            Ok(_) => {}
-            Err(e) => {
-                log::warn!("background sync failed: {e}");
-                let _ = app.emit("app://sync_failed", json!({ "error": e }));
-            }
+        let Some(sc) = app.state::<AppState>().get() else {
+            continue;
+        };
+        if let Err(e) = sc.call("sync", json!({})).await {
+            log::warn!("background sync failed: {e}");
+            let _ = app.emit("app://sync_failed", json!({ "error": e }));
+        }
+    }
+}
+
+/// If the sidecar dies mid-session, bring it back rather than stranding the UI.
+async fn supervise(app: AppHandle) {
+    loop {
+        sleep(Duration::from_secs(15)).await;
+        let state = app.state::<AppState>();
+        if state.get().is_some() {
+            continue;
+        }
+        if let Ok(sc) = start_sidecar(app.clone()).await {
+            log::info!("sidecar restarted");
+            state.set(Some(sc));
+            state.set_error(None);
+            let _ = app.emit("sidecar://restarted", json!({}));
         }
     }
 }
@@ -143,8 +306,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "sync" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    let state = app.state::<AppState>();
-                    let _ = state.sidecar.call("sync", json!({})).await;
+                    if let Some(sc) = app.state::<AppState>().get() {
+                        let _ = sc.call("sync", json!({})).await;
+                    }
                 });
             }
             "quit" => app.exit(0),
@@ -170,19 +334,6 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
 // -------------------------------------------------------------------- main --
 
-/// Where the bundled sidecar lives next to the installed exe.
-fn sidecar_path(app: &AppHandle) -> PathBuf {
-    let name = if cfg!(windows) {
-        "reminders-sidecar.exe"
-    } else {
-        "reminders-sidecar"
-    };
-    app.path()
-        .resource_dir()
-        .map(|d| d.join(name))
-        .unwrap_or_else(|_| PathBuf::from(name))
-}
-
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -194,34 +345,39 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            let program = std::env::var("REMINDERS_SIDECAR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| sidecar_path(&handle));
+            // Managed before anything can fail, so a bad sidecar surfaces as a
+            // real message instead of "state not managed".
+            handle.manage(AppState {
+                sidecar: Mutex::new(None),
+                last_error: Mutex::new(None),
+                tried_paths: Mutex::new(Vec::new()),
+            });
 
-            let data_dir = handle
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| PathBuf::from("."));
-            let args = vec!["--data-dir".to_string(), data_dir.display().to_string()];
+            build_tray(&handle)?;
 
-            tauri::async_runtime::block_on(async {
-                match Sidecar::spawn(handle.clone(), program, args).await {
+            // Start the sidecar off the setup path: a slow or failing spawn
+            // must not stop the window from appearing.
+            let h = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = h.state::<AppState>();
+                match start_sidecar(h.clone()).await {
                     Ok(sc) => {
-                        handle.manage(AppState { sidecar: sc.clone() });
-                        tauri::async_runtime::spawn(notification_loop(handle.clone(), sc.clone()));
-                        tauri::async_runtime::spawn(sync_loop(handle.clone(), sc));
+                        state.set(Some(sc));
+                        state.set_error(None);
+                        let _ = h.emit("sidecar://ready", json!({}));
                     }
                     Err(e) => {
-                        log::error!("could not start sidecar: {e:#}");
-                        let _ = handle.emit(
-                            "sidecar://died",
-                            json!({ "error": format!("{e:#}") }),
-                        );
+                        log::error!("{e}");
+                        state.set_error(Some(e.clone()));
+                        let _ = h.emit("sidecar://died", json!({ "error": e }));
                     }
                 }
             });
 
-            build_tray(&handle)?;
+            tauri::async_runtime::spawn(notification_loop(handle.clone()));
+            tauri::async_runtime::spawn(sync_loop(handle.clone()));
+            tauri::async_runtime::spawn(supervise(handle.clone()));
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -232,7 +388,11 @@ fn main() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![call])
+        .invoke_handler(tauri::generate_handler![
+            call,
+            sidecar_status,
+            restart_sidecar
+        ])
         .run(tauri::generate_context!())
         .expect("error while running application");
 }
