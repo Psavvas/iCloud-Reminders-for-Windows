@@ -17,10 +17,28 @@ notifications.
 
 ## Building
 
-Requires Python 3.11+, Node 18+, and the Rust MSVC toolchain
-(`rustup default stable-x86_64-pc-windows-msvc`), plus the
+Requires Python 3.11+, Node 18+, and the Rust MSVC toolchain, plus the
 [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
 (preinstalled on Windows 11).
+
+```powershell
+winget install Rustlang.Rustup
+# reopen PowerShell so PATH picks up cargo
+rustup default stable-x86_64-pc-windows-msvc
+```
+
+Rust's MSVC toolchain also needs the C++ linker, which rustup does not install
+itself. If a build fails with `link.exe not found`, install
+`Microsoft.VisualStudio.2022.BuildTools` and tick **Desktop development with
+C++**.
+
+Check everything at once before building:
+
+```powershell
+.\scripts\check-prereqs.ps1
+```
+
+Then:
 
 ```powershell
 npm install
