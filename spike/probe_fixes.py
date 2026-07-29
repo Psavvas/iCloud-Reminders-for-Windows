@@ -208,6 +208,8 @@ def main() -> int:
     p.add_argument("--apple-id", default=os.environ.get("ICLOUD_APPLE_ID"))
     p.add_argument("--list", default="Inbox")
     p.add_argument("--accept-terms", action="store_true")
+    p.add_argument("--skip-list", action="store_true", help="Only test the tag fix")
+    p.add_argument("--skip-tags", action="store_true", help="Only test list creation")
     args = p.parse_args()
 
     api = connect(apple_id=args.apple_id, accept_terms=args.accept_terms)
@@ -223,12 +225,15 @@ def main() -> int:
         return 1
     print(f"(using {target.title!r})")
 
-    tag_ok = probe_tag_fix(svc, target.id)
-    list_ok = probe_list_fix(svc)
+    tag_ok = None if args.skip_tags else probe_tag_fix(svc, target.id)
+    list_ok = None if args.skip_list else probe_list_fix(svc)
+
+    def verdict(v):
+        return "skipped" if v is None else ("YES" if v else "NO")
 
     section("SUMMARY")
-    print(f"    Item 5 (tags) fixed by STRING encoding:  {'YES' if tag_ok else 'NO'}")
-    print(f"    Item 6 (list creation) works cleanly:    {'YES' if list_ok else 'NO'}")
+    print(f"    Item 5 (tags) fixed by STRING encoding:  {verdict(tag_ok)}")
+    print(f"    Item 6 (list creation) works cleanly:    {verdict(list_ok)}")
     return 0
 
 
