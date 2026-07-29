@@ -54,6 +54,45 @@ I could not execute these checks myself:
 Items 6 and 7 were nonetheless answered from the library source; see the notes
 below and in `list_create_experiment.py`.
 
+## Findings that change Phase 2 design
+
+**List colour is a JSON blob, not a hex string.** `RemindersList.color` comes
+back as e.g.
+
+```json
+{"daSymbolicColorName":"custom","daHexString":"#5AC8FA","alpha":1,
+ "red":0.352,"green":0.784,"blue":0.980,"colorRGBSpace":2,
+ "ckSymbolicColorName":"lightBlue"}
+```
+
+The UI must parse this and use `daHexString`. Group rows (`is_group=True`) can
+have `color=None`, so the sidebar needs a fallback.
+
+**The account is bigger than a toy.** Observed live: 14 lists, ~2,900 reminders,
+with single lists at 1219, 817 and 326. Initial sync is a few thousand records,
+not a few dozen. Paging does work — an 818-reminder list read back completely
+despite `results_limit=200` — but the first sync should be treated as a bulk
+load with progress, and the SQLite cache is doing real work rather than being a
+nicety.
+
+**Text fields are written wrong by pyicloud.** `_encode_cloudkit_text_field`
+emits `{"type": "ENCRYPTED_BYTES", "value": base64(text)}`, but Apple stores
+these as plain `STRING`. Apple accepts the byte form silently, so writes look
+successful while the Reminders UI cannot read them. Confirmed three ways on a
+live account: all 14 `List` records store `Name` as `STRING`; a hashtag created
+on the iPhone stores `Name` as `STRING` (plus `Type` and `Imported` INT64
+fields); a hashtag created by pyicloud stores `Name` as `ENCRYPTED_BYTES`. Any
+sidecar write touching a text field needs a corrected layer over the library.
+
+**The phone discards malformed writes rather than merging.** After adding a tag
+by hand on the iPhone, `Reminder.HashtagIDs` went from `['ADFDF21B…']` to
+`['1B27D7B2…']` — our record was dropped, not kept alongside. Conflict handling
+cannot assume our writes survive; the app has to read back and reconcile.
+
+**Tags are not in the CRDT title document.** `TitleDocument` was byte-identical
+(113 bytes) before and after a hand-typed tag. Tags are `Hashtag` records plus
+`Reminder.HashtagIDs`, nothing more.
+
 ## Notes per item
 
 **1 — Auth/persistence.** The restart test is real: `run_spike.py` spawns
