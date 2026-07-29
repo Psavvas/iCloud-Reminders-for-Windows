@@ -31,7 +31,10 @@ from typing import Any, Optional
 
 from pyicloud.common.cloudkit import CKModifyOperation, CKRecord
 from pyicloud.services.reminders._constants import _REMINDERS_ZONE_REQ
-from pyicloud.services.reminders._protocol import _generate_resolution_token_map
+from pyicloud.services.reminders._protocol import (
+    _encode_cloudkit_text_field,
+    _generate_resolution_token_map,
+)
 
 
 def public_api_has_list_creation(service: Any) -> tuple[bool, list[str]]:
@@ -107,23 +110,28 @@ def try_create_list(
     attempts: list[str] = []
     now_ms = int(time.time() * 1000)
 
+    # Reminders text fields are NOT plain STRING on the wire. pyicloud encodes
+    # them as {"type": "ENCRYPTED_BYTES", "value": base64(utf8(text))} -- see
+    # `_encode_cloudkit_text_field`, used for Hashtag.Name in _writes.py.
+    # Sending STRING is what produced Apple's
+    #   BAD_REQUEST (byte values must be base64 encoded)
     shapes: list[tuple[str, dict[str, Any]]] = [
         (
-            "minimal (Name only)",
-            {"Name": {"type": "STRING", "value": title}},
+            "minimal (Name as ENCRYPTED_BYTES)",
+            {"Name": _encode_cloudkit_text_field(title)},
         ),
         (
-            "Name+Color",
+            "Name+Color (both ENCRYPTED_BYTES)",
             {
-                "Name": {"type": "STRING", "value": title},
-                "Color": {"type": "STRING", "value": color},
+                "Name": _encode_cloudkit_text_field(title),
+                "Color": _encode_cloudkit_text_field(color),
             },
         ),
         (
-            "reminder-parity (Name,Color,timestamps,tokens,flags)",
+            "reminder-parity (encoded text + timestamps, tokens, flags)",
             {
-                "Name": {"type": "STRING", "value": title},
-                "Color": {"type": "STRING", "value": color},
+                "Name": _encode_cloudkit_text_field(title),
+                "Color": _encode_cloudkit_text_field(color),
                 "Count": {"type": "INT64", "value": 0},
                 "IsGroup": {"type": "INT64", "value": 0},
                 "Deleted": {"type": "INT64", "value": 0},
