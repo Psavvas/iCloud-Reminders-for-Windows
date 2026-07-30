@@ -6,8 +6,9 @@
 // and the bundler cannot drift apart.
 import { existsSync, readFileSync } from "fs";
 import path from "path";
+import { fileURLToPath } from "node:url";
 
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC_TAURI = path.resolve(HERE, "..", "src-tauri");
 
 const conf = JSON.parse(readFileSync(path.join(SRC_TAURI, "tauri.conf.json"), "utf8"));

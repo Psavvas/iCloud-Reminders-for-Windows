@@ -1,6 +1,7 @@
 import { chromium } from "playwright";
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, unlinkSync } from "fs";
 import path from "path";
+import { fileURLToPath } from "node:url";
 
 // Renders src/index.html against a stubbed Tauri bridge and screenshots it.
 //   node tools/screenshots/shoot.mjs
@@ -8,7 +9,7 @@ import path from "path";
 // The mock and the temporary page are copied into src/ only for the duration
 // of the run: everything under src/ is bundled into the app, so neither may be
 // left behind.
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
 const OUT = path.join(REPO, "docs/screenshots");
 

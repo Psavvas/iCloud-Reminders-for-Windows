@@ -14,6 +14,7 @@ avoids it.
 from __future__ import annotations
 
 import ast
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -69,3 +70,34 @@ def test_build_script_does_not_discard_the_probe_stderr():
     """The traceback on stderr is the whole diagnosis when the exe won't start."""
     script = (ROOT / "scripts" / "build-sidecar.ps1").read_text()
     assert "2>$null" not in script
+
+
+# --------------------------------------------------------- build tooling ----
+def test_node_scripts_resolve_their_own_path_portably():
+    """
+    `new URL(import.meta.url).pathname` yields "/D:/src/..." on Windows, and
+    path.resolve then produces "D:\\D:\\src\\...". Only fileURLToPath applies
+    the platform's rules. The two agree on POSIX, so this cannot be caught by
+    running the scripts here -- hence a static check.
+    """
+    offenders = []
+    for js in ROOT.rglob("*.mjs"):
+        if "node_modules" in js.parts:
+            continue
+        text = js.read_text(encoding="utf-8")
+        if "import.meta.url" not in text:
+            continue
+        if ".pathname" in text:
+            offenders.append(str(js.relative_to(ROOT)))
+        elif "fileURLToPath" not in text:
+            offenders.append(str(js.relative_to(ROOT)))
+    assert not offenders, (
+        "these resolve their own path in a way that breaks on Windows: "
+        + ", ".join(offenders)
+    )
+
+
+def test_build_script_runs_the_sidecar_check_first():
+    """The bundler's own failure for a missing resource is not actionable."""
+    pkg = json.loads((ROOT / "package.json").read_text())
+    assert "check-sidecar.mjs" in pkg["scripts"]["build"]

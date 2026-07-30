@@ -3,8 +3,9 @@
 import { chromium } from "playwright";
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, unlinkSync } from "fs";
 import path from "path";
+import { fileURLToPath } from "node:url";
 
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
 const OUT = path.join(REPO, "docs/screenshots");
 mkdirSync(OUT, { recursive: true });
