@@ -48,7 +48,7 @@ function Row({ r, lists, showList, selected, onSelect, onToggle, onRestore, inTr
           )}
           {r.due_date && (
             <span className={`due ${dueClass(r.due_date, r.completed)}`}>
-              {/* Under a date heading the date is redundant; show the time. */}
+              {/* Under a dated heading the date is redundant; show the time. */}
               {dateOnly ? formatTime(r.due_date) : formatDue(r.due_date)}
             </span>
           )}
@@ -279,7 +279,12 @@ const ListPane = forwardRef(function ListPane(
                     onToggle={onToggleComplete}
                     onRestore={onRestore}
                     inTrash={inTrash}
-                    dateOnly={Boolean(showDates && g.label && g.key !== "none")}
+                    // Only hide the date when the heading above actually
+                    // states one. "Overdue" and "No Date" span many days, so
+                    // a bare time there reads as today and is misleading.
+                    dateOnly={Boolean(
+                      showDates && g.label && g.key !== "none" && g.key !== "overdue"
+                    )}
                   />
                 ))}
               </ul>
