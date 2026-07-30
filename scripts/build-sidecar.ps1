@@ -39,6 +39,11 @@ try {
 
     Write-Host "Freezing sidecar..." -ForegroundColor Cyan
 
+    # Entry point is run_sidecar.py, NOT reminders_sidecar/__main__.py.
+    # PyInstaller runs the given script as a top-level module, so freezing
+    # __main__.py directly leaves its relative imports with no parent package
+    # and the exe dies at startup with
+    #   ImportError: attempted relative import with no known parent package
     $pyiArgs = @(
         "-m", "PyInstaller",
         "--onefile",
@@ -49,12 +54,20 @@ try {
         "--workpath", "build\pyinstaller",
         "--specpath", "build",
         "--console",
-        # keyring reaches its Windows backend dynamically, so PyInstaller's
-        # import scanner cannot see it.
+        "--paths", "sidecar",
+        "--collect-submodules", "reminders_sidecar",
+        # These reach for modules and data files the import scanner cannot see:
+        # pydantic builds models at runtime, keyring picks its backend
+        # dynamically, and fido2 (pulled in by pyicloud for security-key 2FA)
+        # ships a public_suffix_list.dat that must travel with it.
+        "--collect-all", "pyicloud",
+        "--collect-all", "pydantic",
+        "--collect-all", "keyring",
+        "--collect-all", "fido2",
+        "--collect-all", "srp",
         "--hidden-import", "keyring.backends.Windows",
         "--hidden-import", "win32timezone",
-        "--collect-submodules", "pyicloud",
-        "sidecar\reminders_sidecar\__main__.py"
+        "sidecar\run_sidecar.py"
     )
 
     & $venvPython $pyiArgs
@@ -67,16 +80,27 @@ try {
 
     # A frozen exe that cannot start is worse than a build failure, because it
     # only surfaces later as a dead app. Prove it answers before bundling it.
+    #
+    # stderr is captured, not discarded: when the exe dies it dies with a Python
+    # traceback on stderr, and that traceback is the entire diagnosis.
     Write-Host "Smoke-testing the frozen exe..." -ForegroundColor Cyan
     $probeDir = Join-Path $env:TEMP "reminders-sync-buildcheck"
-    $out = '{"id":1,"method":"ping","params":{}}' | & $exe --data-dir $probeDir 2>$null
-    if ($out -match '"pong"') {
+
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $probeOut = ('{"id":1,"method":"ping","params":{}}' |
+                 & $exe --data-dir $probeDir 2>&1 | Out-String)
+    $ErrorActionPreference = $prevEAP
+
+    if ($probeOut -match '"pong"') {
         Write-Host "OK: sidecar responds to ping" -ForegroundColor Green
     } else {
-        Write-Host "WARNING: the frozen sidecar did not answer ping." -ForegroundColor Yellow
-        Write-Host "Output was:" -ForegroundColor Yellow
-        Write-Host $out
-        Write-Host "It will still be bundled, but the app may not start." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "The frozen sidecar did not answer. Its output:" -ForegroundColor Red
+        Write-Host "----------------------------------------------------------------"
+        Write-Host $probeOut
+        Write-Host "----------------------------------------------------------------"
+        throw "Frozen sidecar failed its smoke test. The app would not start with this build."
     }
 
     Write-Host ""
