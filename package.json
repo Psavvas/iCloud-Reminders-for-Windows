@@ -5,8 +5,9 @@
   "description": "iCloud Reminders for Windows",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build",
-    "tauri": "tauri"
+    "build": "node scripts/check-sidecar.mjs && tauri build",
+    "tauri": "tauri",
+    "prebuild-check": "node scripts/check-sidecar.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

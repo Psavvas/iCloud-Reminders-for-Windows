@@ -24,9 +24,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
-    "icon": ["icons/icon.ico", "icons/128x128.png"],
-    "resources": ["../dist-sidecar/*"],
+    "targets": [
+      "nsis",
+      "msi"
+    ],
+    "icon": [
+      "icons/icon.ico",
+      "icons/128x128.png"
+    ],
+    "resources": {
+      "../dist-sidecar/reminders-sidecar.exe": "reminders-sidecar.exe"
+    },
     "windows": {
       "nsis": {
         "installMode": "perMachine"

@@ -136,6 +136,7 @@ async function showSidecarDown(detail) {
   try {
     const st = await invoke("sidecar_status");
     if (st.error) text = st.error;
+    // The paths live only here; the message itself no longer repeats them.
     if (st.tried_paths && st.tried_paths.length) {
       text += "\n\nLooked in:\n" + st.tried_paths.join("\n");
     }

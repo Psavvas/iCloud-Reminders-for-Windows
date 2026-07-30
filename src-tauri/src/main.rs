@@ -93,6 +93,18 @@ fn candidate_paths(app: &AppHandle) -> Vec<PathBuf> {
         }
     }
     out.push(PathBuf::from("dist-sidecar").join(exe_name));
+
+    // Walking up from the exe produces repeats on a short install path.
+    let mut seen = Vec::new();
+    out.retain(|p| {
+        let key = p.display().to_string();
+        if seen.contains(&key) {
+            false
+        } else {
+            seen.push(key);
+            true
+        }
+    });
     out
 }
 
@@ -107,10 +119,22 @@ async fn start_sidecar(app: AppHandle) -> Result<Arc<Sidecar>, String> {
 
     let found = candidates.iter().find(|p| p.exists());
     let Some(path) = found else {
-        return Err(format!(
-            "Could not find the sync service. Run scripts\\build-sidecar.ps1 to build it.\n\nLooked in:\n{}",
-            tried.join("\n")
-        ));
+        // Distinguish the two ways this happens: never built, or built but not
+        // bundled into the installer.
+        let installed = app
+            .path()
+            .resource_dir()
+            .map(|d| d.components().any(|c| c.as_os_str() == "Program Files"))
+            .unwrap_or(false);
+        let advice = if installed {
+            "This installed copy doesn't contain the sync service.\n\
+             Run scripts\\build-sidecar.ps1, then npm run build, then reinstall \
+             — the installer only picks it up if it exists at build time."
+        } else {
+            "Run scripts\\build-sidecar.ps1 to build it, or set REMINDERS_SIDECAR \
+             to point at it."
+        };
+        return Err(format!("{advice}"));
     };
 
     let data_dir = app
