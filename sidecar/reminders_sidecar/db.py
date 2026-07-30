@@ -18,7 +18,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# The Completed view shows only this many, most recent first. Apple's own client
+# does the same; the full history is thousands of rows on a real account and
+# rendering it makes the app feel slow for no benefit.
+COMPLETED_LIMIT = 50
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -43,6 +48,7 @@ CREATE TABLE IF NOT EXISTS reminders (
     due_date     TEXT,               -- ISO-8601 UTC, or NULL
     priority     INTEGER NOT NULL DEFAULT 0,
     completed    INTEGER NOT NULL DEFAULT 0,
+    completed_date TEXT,               -- ISO-8601 UTC, when it was ticked off
     flagged      INTEGER NOT NULL DEFAULT 0,
     all_day      INTEGER NOT NULL DEFAULT 0,
     deleted      INTEGER NOT NULL DEFAULT 0,
@@ -134,8 +140,30 @@ class Cache:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
+            self._migrate()
             self._conn.commit()
         self.set_meta("schema_version", str(SCHEMA_VERSION))
+
+    def _migrate(self) -> None:
+        """
+        Additive migrations for caches created by an earlier version.
+
+        The cache is disposable -- a full sync rebuilds it -- but silently
+        wiping someone's queued edits would not be, so columns are added in
+        place rather than by recreating the table.
+        """
+        cols = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(reminders)").fetchall()
+        }
+        if "completed_date" not in cols:
+            self._conn.execute("ALTER TABLE reminders ADD COLUMN completed_date TEXT")
+            # Nothing to backfill from: the column did not exist, so the value
+            # was never recorded. The next full sync fills it in.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reminders_completed "
+            "ON reminders(completed_date DESC) WHERE completed = 1 AND deleted = 0"
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -219,12 +247,14 @@ class Cache:
                 self._conn.execute(
                     "INSERT INTO reminders("
                     " id,list_id,title,description,due_date,priority,completed,"
-                    " flagged,all_day,deleted,created,modified,change_tag,notified,dirty"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,0) "
+                    " completed_date,flagged,all_day,deleted,created,modified,"
+                    " change_tag,notified,dirty"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0) "
                     "ON CONFLICT(id) DO UPDATE SET "
                     " list_id=excluded.list_id, title=excluded.title,"
                     " description=excluded.description, due_date=excluded.due_date,"
                     " priority=excluded.priority, completed=excluded.completed,"
+                    " completed_date=excluded.completed_date,"
                     " flagged=excluded.flagged, all_day=excluded.all_day,"
                     " deleted=excluded.deleted, modified=excluded.modified,"
                     " change_tag=excluded.change_tag, notified=excluded.notified",
@@ -236,6 +266,7 @@ class Cache:
                         r.get("due_date"),
                         int(r.get("priority") or 0),
                         1 if r.get("completed") else 0,
+                        r.get("completed_date"),
                         1 if r.get("flagged") else 0,
                         1 if r.get("all_day") else 0,
                         1 if r.get("deleted") else 0,
@@ -248,6 +279,37 @@ class Cache:
                 n += 1
             self._conn.commit()
         return n
+
+    @staticmethod
+    def _order_clause(sort: Optional[str], scope: Optional[str] = None) -> str:
+        """
+        SQL ordering for a sort mode. Kept here rather than in the UI so a
+        1,219-row list is ordered and truncated by SQLite, not by JavaScript.
+        """
+        # Undated sorts last in every date-based mode; an undated reminder is
+        # not "infinitely soon".
+        due_nulls_last = "CASE WHEN r.due_date IS NULL THEN 1 ELSE 0 END, r.due_date"
+        # Apple's priority values are not ordinal: 1 high, 5 medium, 9 low,
+        # 0 none. Sorting numerically would put "none" first.
+        priority_rank = "CASE r.priority WHEN 1 THEN 0 WHEN 5 THEN 1 WHEN 9 THEN 2 ELSE 3 END"
+
+        if scope == "completed" and sort in (None, "", "manual"):
+            # Most recently ticked off first; that is the only useful order here.
+            return "r.completed_date DESC NULLS LAST, r.modified DESC"
+
+        return {
+            "title": "r.title COLLATE NOCASE, " + due_nulls_last,
+            "title_desc": "r.title COLLATE NOCASE DESC",
+            "due": due_nulls_last + ", r.title COLLATE NOCASE",
+            "due_desc": "CASE WHEN r.due_date IS NULL THEN 1 ELSE 0 END, r.due_date DESC",
+            "priority": priority_rank + ", " + due_nulls_last,
+            "created": "r.created DESC",
+            "created_asc": "r.created",
+        }.get(
+            sort or "manual",
+            # Default: incomplete first, then soonest due, then alphabetical.
+            "r.completed, " + due_nulls_last + ", r.title COLLATE NOCASE",
+        )
 
     @staticmethod
     def _day_bounds(now: Optional[datetime] = None) -> tuple[str, str]:
@@ -270,6 +332,7 @@ class Cache:
         scope: Optional[str] = None,
         include_completed: bool = False,
         search: Optional[str] = None,
+        sort: Optional[str] = None,
         limit: int = 1000,
         now: Optional[datetime] = None,
     ) -> list[dict]:
@@ -315,12 +378,12 @@ class Cache:
             sql.append("AND (r.title LIKE ? OR r.description LIKE ?)")
             like = f"%{search}%"
             args += [like, like]
-        # Undated reminders sort last; otherwise soonest first.
-        sql.append(
-            "ORDER BY r.completed, "
-            "CASE WHEN r.due_date IS NULL THEN 1 ELSE 0 END, r.due_date, r.title "
-            "LIMIT ?"
-        )
+        sql.append("ORDER BY " + self._order_clause(sort, scope))
+        sql.append("LIMIT ?")
+        # Completed is capped hard: the full history can be thousands of rows and
+        # nobody scrolls it. Fifty most-recent is what the view is for.
+        if scope == "completed":
+            limit = min(limit, COMPLETED_LIMIT)
         args.append(limit)
 
         with self._lock:

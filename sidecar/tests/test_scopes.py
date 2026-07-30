@@ -30,6 +30,10 @@ def mk(rid, **kw):
     return base
 
 
+def order(rows):
+    return [r["id"] for r in rows]
+
+
 @pytest.fixture
 def seeded(cache):
     mid = local_midnight()
@@ -120,3 +124,110 @@ def test_settings_defaults_and_merge(cache):
 def test_settings_ignores_unknown_keys(cache):
     cache.set_settings({"nonsense": 1})
     assert "nonsense" not in cache.get_settings()
+
+
+# ------------------------------------------------------------------ sorting
+@pytest.fixture
+def sortable(cache):
+    mid = local_midnight()
+    cache.upsert_reminders([
+        mk("b_none", title="banana", priority=0, due_date=to_iso(mid + timedelta(days=3))),
+        mk("a_high", title="apple", priority=1, due_date=to_iso(mid + timedelta(days=2))),
+        mk("c_med", title="cherry", priority=5, due_date=to_iso(mid + timedelta(days=1))),
+        mk("d_low", title="date", priority=9),
+    ])
+    return cache
+
+
+def test_sort_by_title_is_case_insensitive(sortable):
+    sortable.upsert_reminders([mk("Z_upper", title="Apricot")])
+    got = order(sortable.reminders(sort="title"))
+    assert got.index("Z_upper") < got.index("b_none")  # Apricot before banana
+
+
+def test_sort_by_due_puts_undated_last(sortable):
+    got = order(sortable.reminders(sort="due"))
+    assert got == ["c_med", "a_high", "b_none", "d_low"]
+
+
+def test_sort_by_priority_uses_apple_ranking_not_the_raw_number(sortable):
+    """Apple's values are 1 high, 5 medium, 9 low, 0 none -- not ordinal."""
+    assert order(sortable.reminders(sort="priority")) == [
+        "a_high", "c_med", "d_low", "b_none"
+    ]
+
+
+def test_unknown_sort_falls_back_to_the_default(sortable):
+    assert order(sortable.reminders(sort="nonsense")) == order(
+        sortable.reminders(sort="manual")
+    )
+
+
+def test_sort_survives_a_scope_filter(sortable):
+    got = order(sortable.reminders(scope="upcoming", sort="priority"))
+    assert got == ["a_high", "c_med", "b_none"]  # d_low has no due date
+
+
+# ---------------------------------------------------------- completed limit
+def test_completed_is_capped_and_most_recent_first(cache):
+    from reminders_sidecar.db import COMPLETED_LIMIT
+
+    now = utcnow()
+    cache.upsert_reminders([
+        mk(f"c{i:03d}", completed=True, completed_date=to_iso(now - timedelta(hours=i)))
+        for i in range(COMPLETED_LIMIT + 40)
+    ])
+    rows = cache.reminders(scope="completed")
+    assert len(rows) == COMPLETED_LIMIT
+    # Newest first: c000 was completed an hour ago, c089 ninety hours ago.
+    assert rows[0]["id"] == "c000"
+    assert rows[-1]["id"] == f"c{COMPLETED_LIMIT - 1:03d}"
+
+
+def test_completed_cap_is_not_raised_by_a_bigger_limit(cache):
+    from reminders_sidecar.db import COMPLETED_LIMIT
+
+    now = utcnow()
+    cache.upsert_reminders([
+        mk(f"c{i}", completed=True, completed_date=to_iso(now - timedelta(hours=i)))
+        for i in range(120)
+    ])
+    assert len(cache.reminders(scope="completed", limit=5000)) == COMPLETED_LIMIT
+
+
+def test_other_scopes_are_not_capped(cache):
+    cache.upsert_reminders([mk(f"r{i}") for i in range(120)])
+    assert len(cache.reminders(scope="all", limit=1000)) == 120
+
+
+def test_completed_without_dates_still_returns_rows(cache):
+    """Rows cached before completed_date existed have NULL there."""
+    cache.upsert_reminders([mk("old", completed=True)])
+    assert order(cache.reminders(scope="completed")) == ["old"]
+
+
+def test_migration_adds_completed_date_to_an_existing_cache(tmp_path):
+    """A cache from the previous schema must open, not crash."""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.executescript(
+        "CREATE TABLE reminders (id TEXT PRIMARY KEY, list_id TEXT NOT NULL,"
+        " title TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',"
+        " due_date TEXT, priority INTEGER NOT NULL DEFAULT 0,"
+        " completed INTEGER NOT NULL DEFAULT 0, flagged INTEGER NOT NULL DEFAULT 0,"
+        " all_day INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0,"
+        " created TEXT, modified TEXT, change_tag TEXT,"
+        " notified INTEGER NOT NULL DEFAULT 0, dirty INTEGER NOT NULL DEFAULT 0);"
+        "INSERT INTO reminders(id, list_id, title) VALUES('R/1','L','kept');"
+    )
+    con.commit()
+    con.close()
+
+    c = Cache(path)
+    try:
+        assert c.reminder("R/1")["title"] == "kept"
+        assert "completed_date" in c.reminder("R/1")
+    finally:
+        c.close()

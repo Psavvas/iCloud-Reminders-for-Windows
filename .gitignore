@@ -21,3 +21,7 @@ build/
 
 # Screenshot tooling deps
 tools/screenshots/node_modules/
+
+# Vite output and UI deps
+dist/
+src-react/node_modules/

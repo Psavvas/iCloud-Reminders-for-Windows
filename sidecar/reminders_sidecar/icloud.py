@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
@@ -192,14 +193,65 @@ class ICloudClient:
         }
 
     # ----------------------------------------------------------------- reads
+    @staticmethod
+    def _clean_title(title: Any) -> str:
+        """
+        Decode a list name that came back as bytes.
+
+        Apple stores List.Name as a plain STRING. A record written with the
+        ENCRYPTED_BYTES encoding pyicloud uses for hashtags stores raw bytes
+        instead, and the mapper's str() then yields the literal "b'name'".
+        Apple's own clients ignore such a record entirely.
+        """
+        if isinstance(title, (bytes, bytearray)):
+            try:
+                return title.decode("utf-8")
+            except UnicodeDecodeError:
+                return "Untitled"
+        text = str(title or "")
+        # The mapper has usually already stringified it by this point.
+        m = re.fullmatch(r"b(['\"])(.*)\1", text, re.S)
+        return m.group(2) if m else text
+
+    def _deleted_list_ids(self, ids: list[str]) -> set[str]:
+        """
+        List IDs whose record is flagged deleted.
+
+        `lists()` yields every List record in the zone, including soft-deleted
+        ones -- deletion here is a Deleted=1 flag, not a removal -- and the
+        typed model does not carry that flag. Apple's clients hide these, so
+        the raw records are consulted to do the same.
+        """
+        if not ids:
+            return set()
+        try:
+            from pyicloud.common.cloudkit import CKRecord
+            from pyicloud.services.reminders._constants import _REMINDERS_ZONE_REQ
+
+            resp = self._service()._raw.lookup(  # noqa: SLF001
+                record_names=ids, zone_id=_REMINDERS_ZONE_REQ
+            )
+            out = set()
+            for rec in resp.records:
+                if isinstance(rec, CKRecord) and rec.fields.get_value("Deleted"):
+                    out.add(rec.recordName)
+            return out
+        except Exception as exc:  # noqa: BLE001 - never fail a sync over this
+            LOGGER.debug("could not read List deleted flags: %s", exc)
+            return set()
+
     def lists(self) -> list[dict]:
         svc = self._service()
+        raw = list(svc.lists())
+        hidden = self._deleted_list_ids([l.id for l in raw])
         out = []
-        for l in svc.lists():
+        for l in raw:
+            if l.id in hidden:
+                continue
             out.append(
                 {
                     "id": l.id,
-                    "title": l.title,
+                    "title": self._clean_title(l.title),
                     "color_hex": parse_color(l.color),
                     "count": l.count,
                     "is_group": bool(l.is_group),
@@ -356,6 +408,9 @@ class ICloudClient:
             "due_date": (_as_utc(r.due_date).isoformat() if r.due_date else None),
             "priority": int(r.priority or 0),
             "completed": bool(r.completed),
+            "completed_date": (
+                _as_utc(r.completed_date).isoformat() if r.completed_date else None
+            ),
             "flagged": bool(r.flagged),
             "all_day": bool(r.all_day),
             "deleted": bool(r.deleted),

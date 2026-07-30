@@ -1,72 +1,106 @@
+// Renders the built UI against a stubbed Tauri bridge and screenshots it.
+//   npm run shoot
+//
+// Shoots dist/, not the sources: what ships is what gets captured. The mock is
+// injected ahead of the app bundle so the bridge exists before React mounts.
+// Both temporary files live in dist/ and are removed on exit.
 import { chromium } from "playwright";
-import { readFileSync, writeFileSync, mkdirSync, copyFileSync, unlinkSync } from "fs";
+import {
+  readFileSync, writeFileSync, mkdirSync, copyFileSync, unlinkSync, existsSync,
+} from "fs";
 import path from "path";
+import http from "node:http";
 import { fileURLToPath } from "node:url";
 
-// Renders src/index.html against a stubbed Tauri bridge and screenshots it.
-//   node tools/screenshots/shoot.mjs
-//
-// The mock and the temporary page are copied into src/ only for the duration
-// of the run: everything under src/ is bundled into the app, so neither may be
-// left behind.
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
 const OUT = path.join(REPO, "docs/screenshots");
+const DIST = path.join(REPO, "dist");
 
 mkdirSync(OUT, { recursive: true });
 
-const TMP_HTML = path.join(REPO, "src/__shot.html");
-const TMP_MOCK = path.join(REPO, "src/__mock.js");
+if (!existsSync(path.join(DIST, "index.html"))) {
+  console.error("dist/ not built. Run: npm --prefix src-react run build");
+  process.exit(1);
+}
 
+const TMP_HTML = path.join(DIST, "__shot.html");
+const TMP_MOCK = path.join(DIST, "__mock.js");
 copyFileSync(path.join(HERE, "mock.js"), TMP_MOCK);
 writeFileSync(
   TMP_HTML,
-  readFileSync(path.join(REPO, "src/index.html"), "utf8").replace(
-    '<script src="app.js"></script>',
-    '<script src="__mock.js"></script>\n<script src="app.js"></script>'
+  readFileSync(path.join(DIST, "index.html"), "utf8").replace(
+    "<head>",
+    '<head>\n<script src="./__mock.js"></script>'
   )
 );
-const cleanup = () => { for (const f of [TMP_HTML, TMP_MOCK]) { try { unlinkSync(f); } catch {} } };
+const cleanup = () => {
+  for (const f of [TMP_HTML, TMP_MOCK]) {
+    try { unlinkSync(f); } catch { /* already gone */ }
+  }
+};
 process.on("exit", cleanup);
 
-const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium-1194/chrome-linux/chrome" });
+// Vite emits <script type="module">, which browsers refuse to load over
+// file:// for CORS reasons. Tauri serves the frontend over http://tauri.localhost,
+// so this only affects the tooling -- serve dist/ over HTTP to match.
+const MIME = {
+  ".html": "text/html", ".js": "text/javascript", ".css": "text/css",
+  ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json",
+};
+const server = http.createServer((req, res) => {
+  const rel = decodeURIComponent(req.url.split("?")[0]).replace(/^\/+/, "") || "index.html";
+  const file = path.join(DIST, rel);
+  if (!file.startsWith(DIST) || !existsSync(file)) {
+    res.writeHead(404).end("not found");
+    return;
+  }
+  res.writeHead(200, { "Content-Type": MIME[path.extname(file)] || "application/octet-stream" });
+  res.end(readFileSync(file));
+});
+await new Promise((r) => server.listen(0, "127.0.0.1", r));
+const ORIGIN = `http://127.0.0.1:${server.address().port}`;
 
-async function shoot(name, { dark = false, prep = null, width = 1180, height = 760 } = {}) {
+const browser = await chromium.launch({
+  executablePath: "/opt/pw-browsers/chromium-1194/chrome-linux/chrome",
+});
+
+async function shoot(
+  name,
+  { dark = false, prep = null, width = 1180, height = 760, flags = {} } = {}
+) {
   const ctx = await browser.newContext({
     viewport: { width, height },
     deviceScaleFactor: 2,
     colorScheme: dark ? "dark" : "light",
+    reducedMotion: "reduce", // settle animations so captures are deterministic
   });
+  if (Object.keys(flags).length) {
+    await ctx.addInitScript((f) => Object.assign(window, f), flags);
+  }
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`  ! page error: ${e.message}`));
-  await page.goto("file://" + TMP_HTML);
-  await page.waitForTimeout(700);
+  await page.goto(`${ORIGIN}/__shot.html`);
+  await page.waitForSelector(".app, .gate", { timeout: 15000 });
+  await page.waitForTimeout(500);
   if (prep) await prep(page);
-  await page.waitForTimeout(450);
-  const file = path.join(OUT, name + ".png");
-  await page.screenshot({ path: file });
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: path.join(OUT, name + ".png") });
   console.log("  wrote " + name + ".png");
   await ctx.close();
 }
 
-const selectInbox = async (page) => {
-  await page.evaluate(() => {
-    const rows = [...document.querySelectorAll(".list-row")];
-    const inbox = rows.find((r) => r.textContent.includes("Inbox"));
-    if (inbox) inbox.click();
-  });
+const clickRow = async (page, text) => {
+  await page.evaluate((t) => {
+    const r = [...document.querySelectorAll(".row")].find((x) =>
+      x.textContent.includes(t)
+    );
+    if (r) r.click();
+  }, text);
   await page.waitForTimeout(400);
 };
 
-const clickSmart = async (page, label) => {
-  await page.evaluate((l) => {
-    const r = [...document.querySelectorAll(".smart-row")].find((x) =>
-      x.textContent.includes(l)
-    );
-    if (r) r.click();
-  }, label);
-  await page.waitForTimeout(400);
-};
+const selectInbox = (page) => clickRow(page, "Inbox");
 
 const openDetail = async (page) => {
   await selectInbox(page);
@@ -97,109 +131,88 @@ await shoot("03-tag-filter", {
 });
 
 await shoot("04-conflict", {
+  flags: { __MOCK_CONFLICT: true },
   prep: async (page) => {
-    await page.evaluate(() => { window.__MOCK_CONFLICT = true; });
     await selectInbox(page);
-    await page.evaluate(() => window.showConflicts && window.showConflicts());
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(600);
   },
 });
-
 
 await shoot("07-new-reminder", {
   prep: async (page) => {
     await selectInbox(page);
-    await page.click("#new-btn");
+    await page.click(".add-btn");
     await page.waitForTimeout(350);
-    await page.fill("#new-title", "Order lab safety goggles");
-    await page.fill("#new-notes", "Needed before Thursday's titration.");
-    await page.selectOption("#new-priority", "5");
+    await page.fill("#n-title", "Order lab safety goggles");
+    await page.fill("#n-notes", "Needed before Thursday's titration.");
+    await page.selectOption("#n-prio", "5");
   },
 });
 
+await shoot("08-today", { prep: (p) => clickRow(p, "Today") });
 
-await shoot("08-today", { prep: (p) => clickSmart(p, "Today") });
+await shoot("15-upcoming-dates", { prep: (p) => clickRow(p, "Upcoming") });
+
+await shoot("16-sort-menu", {
+  prep: async (page) => {
+    await selectInbox(page);
+    await page.click('button[title="Sort"]');
+    await page.waitForTimeout(300);
+  },
+});
 
 await shoot("09-search-global", {
   prep: async (page) => {
     await selectInbox(page);
-    await page.click("#search-btn");
-    await page.waitForTimeout(280);
-    await page.click("#search-scope");
-    await page.fill("#search", "lab");
-    await page.waitForTimeout(350);
+    await page.click(".search-wrap .icon-btn.round");
+    await page.waitForTimeout(320);
+    await page.click(".scope-btn");
+    await page.fill('.search-box input[type="search"]', "lab");
+    await page.waitForTimeout(450);
   },
 });
 
-await shoot("10-deleted", { prep: (p) => clickSmart(p, "Deleted"), dark: true });
+await shoot("10-deleted", { prep: (p) => clickRow(p, "Deleted"), dark: true });
 
 await shoot("11-settings", {
   prep: async (page) => {
     await selectInbox(page);
-    await page.click("#settings-btn");
+    await page.click('button[title^="Settings"]');
     await page.waitForTimeout(350);
-  },
-});
-
-
-await shoot("12-onboarding", {
-  prep: async (page) => {
-    await page.evaluate(() => { window.startOnboarding && window.startOnboarding(); });
-    await page.evaluate(() => {
-      document.getElementById("onboard").classList.remove("hidden");
-      document.querySelectorAll(".onboard-step").forEach((el) =>
-        el.classList.toggle("hidden", el.dataset.step !== "2")
-      );
-      const dots = document.getElementById("onboard-dots");
-      dots.innerHTML = "";
-      for (let i = 0; i < 4; i++) {
-        const d = document.createElement("span");
-        d.className = "dot-pip" + (i === 2 ? " on" : "");
-        dots.appendChild(d);
-      }
-    });
-    await page.waitForTimeout(300);
   },
 });
 
 await shoot("13-print-options", {
   prep: async (page) => {
     await selectInbox(page);
-    await page.click("#print-btn");
-    await page.waitForTimeout(320);
+    await page.click('button[title^="Print"]');
+    await page.waitForTimeout(350);
+  },
+});
+
+await shoot("12-onboarding", {
+  flags: { __MOCK_ONBOARD: true },
+  prep: async (page) => {
+    await page.waitForSelector(".onboard", { timeout: 10000 });
+    for (let i = 0; i < 2; i++) {
+      await page.click(".onboard-actions .primary");
+      await page.waitForTimeout(250);
+    }
   },
 });
 
 await shoot("05-signin", {
+  width: 900,
+  height: 620,
+  flags: { __MOCK_SIGNED_OUT: true },
   prep: async (page) => {
-    await page.evaluate(() => {
-      document.getElementById("app").classList.add("hidden");
-      document.getElementById("gate").classList.remove("hidden");
-      for (const s of document.querySelectorAll(".gate-step")) s.classList.add("hidden");
-      document.getElementById("gate-login").classList.remove("hidden");
-      document.getElementById("apple-id").value = "you@icloud.com";
-      document.getElementById("password").value = "............";
-    });
+    await page.waitForSelector("#apple-id", { timeout: 10000 });
+    await page.fill("#apple-id", "you@icloud.com");
+    await page.fill("#password", "............");
   },
-  width: 900, height: 620,
-});
-
-await shoot("06-sidecar-down", {
-  prep: async (page) => {
-    await page.evaluate(() => {
-      document.getElementById("app").classList.add("hidden");
-      document.getElementById("gate").classList.remove("hidden");
-      for (const s of document.querySelectorAll(".gate-step")) s.classList.add("hidden");
-      document.getElementById("gate-sidecar").classList.remove("hidden");
-      document.getElementById("sidecar-detail").textContent =
-        "Could not find the sync service. Run scripts\\build-sidecar.ps1 to build it.\n\n" +
-        "Looked in:\nC:\\Program Files\\iCloud Reminders\\reminders-sidecar.exe\n" +
-        "D:\\source\\reminders-sync\\dist-sidecar\\reminders-sidecar.exe";
-    });
-  },
-  width: 900, height: 620,
 });
 
 await browser.close();
+server.close();
 cleanup();
 console.log("done -> docs/screenshots/");

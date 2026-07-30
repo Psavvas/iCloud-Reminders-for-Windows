@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "node scripts/check-sidecar.mjs && tauri build",
+    "ui": "npm --prefix src-react run dev",
     "tauri": "tauri",
-    "prebuild-check": "node scripts/check-sidecar.mjs"
+    "postinstall": "npm --prefix src-react install"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

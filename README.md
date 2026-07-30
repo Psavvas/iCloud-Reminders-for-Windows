@@ -12,6 +12,8 @@ notifications.
 - **Python sidecar** — owns iCloud access and the SQLite cache, frozen with
   PyInstaller and bundled beside the exe. Speaks newline-delimited JSON over
   stdio.
+- **React + Vite frontend** — reconciled rather than rebuilt, so changing a
+  filter re-renders only the rows that differ instead of discarding the list.
 - **SQLite cache** — every read the UI performs is a local query. The network
   is never on the critical path of a click.
 
@@ -56,7 +58,7 @@ rebuild depends on what changed:
 
 | Changed | Installed build | `npm run dev` |
 |---|---|---|
-| `src/` (HTML, CSS, JS) | `npm run build`, reinstall | reload the window (Ctrl+R) |
+| `src-react/` (React UI) | `npm run build`, reinstall | hot-reloads instantly |
 | `src-tauri/` (Rust) | `npm run build`, reinstall | recompiles on save |
 | `sidecar/` (Python) | `.\scripts\build-sidecar.ps1`, then `npm run build` | see below |
 | `src-tauri/icons/` | `python scripts/make_icons.py`, rebuild, reinstall | — |
@@ -110,6 +112,7 @@ due-date toasts to be worth anything. Quit from the tray menu.
 | Background sync | Delta cursor, every 5–15 minutes |
 | Due-date notifications | 30s tick, Windows toast |
 | Smart lists | Today, Upcoming, All, Completed, Deleted |
+| Sorting | Per list: due date, priority, title, recently added |
 | Printing | Any view, grouped by due date, priority or list |
 
 The two gaps are Apple's, not oversights. Phase 1 established both against a
@@ -150,6 +153,19 @@ Later, or by priority or list — and each gets an empty square to tick off by
 hand. Notes and completed items are optional. `break-inside: avoid` keeps a
 reminder from splitting across a page.
 
+**Ordering happens in SQLite.** Sort mode and the Completed cap are applied by
+the query, not by JavaScript after the fact — a 1,219-row list should never
+reach the UI just to be reordered or truncated there. Sort is remembered per
+list, so ordering Chores by due date leaves every other list alone.
+
+**Completed shows 50.** The full history runs to thousands of rows on a real
+account and nobody scrolls it. Fifty most-recently-completed, newest first.
+
+**Date headings.** Views spanning more than one day (Upcoming, All, Today)
+group under Overdue / Today / Tomorrow / a real date, and rows under a heading
+show only their time, since the date is already above them. Grouping is by local
+calendar day, matching how the sidecar buckets Today.
+
 **Lists on every sync.** `iter_changes()` only ever reports reminders, so a
 renamed or deleted list would never appear through the delta cursor. Lists are
 re-read in full on every sync pass, delta included.
@@ -159,8 +175,9 @@ re-read in full on every sync pass, delta included.
 ```
 sidecar/        Python: iCloud client, SQLite cache, sync, notification policy
 src-tauri/      Rust: window, tray, timers, sidecar IPC
-src/            Frontend: sidebar, list, detail
-scripts/        Icon generation, sidecar freeze
+src-react/      React UI, built by Vite into dist/
+scripts/        Icon generation, sidecar freeze, build checks
+tools/          Screenshot and print-layout tooling
 spike/          Phase 1 validation scripts and findings
 ```
 

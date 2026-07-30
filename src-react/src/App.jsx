@@ -1,0 +1,449 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { call, invoke, listen, parseError } from "./bridge.js";
+import Gate from "./components/Gate.jsx";
+import Sidebar from "./components/Sidebar.jsx";
+import ListPane from "./components/ListPane.jsx";
+import Detail from "./components/Detail.jsx";
+import NewReminderSheet from "./components/NewReminderSheet.jsx";
+import SettingsSheet from "./components/SettingsSheet.jsx";
+import PrintSheet from "./components/PrintSheet.jsx";
+import Onboarding from "./components/Onboarding.jsx";
+import Banner from "./components/Banner.jsx";
+
+const SMART = [
+  { key: "today", label: "Today", glyph: "◉", color: "#007aff" },
+  { key: "upcoming", label: "Upcoming", glyph: "▤", color: "#ff3b30" },
+  { key: "all", label: "All", glyph: "≡", color: "#8e8e93" },
+  { key: "completed", label: "Completed", glyph: "✓", color: "#34c759" },
+  { key: "deleted", label: "Deleted", glyph: "✕", color: "#8e8e93" },
+];
+
+function applyTheme(theme) {
+  const root = document.documentElement;
+  if (theme === "light" || theme === "dark") root.dataset.theme = theme;
+  else delete root.dataset.theme;
+}
+
+export default function App() {
+  const [phase, setPhase] = useState("loading"); // loading | gate | app
+  const [gateStep, setGateStep] = useState("loading");
+  const [gateError, setGateError] = useState("");
+  const [sidecarDetail, setSidecarDetail] = useState("");
+
+  const [settings, setSettings] = useState({});
+  const [lists, setLists] = useState([]);
+  const [tags, setTags] = useState([]);
+  const [counts, setCounts] = useState({});
+  const [rows, setRows] = useState([]);
+  const [status, setStatus] = useState({});
+  const [conflicts, setConflicts] = useState([]);
+
+  // Exactly one of scope / listId / tag is active.
+  const [scope, setScope] = useState("today");
+  const [listId, setListId] = useState(null);
+  const [tag, setTag] = useState(null);
+
+  const [selectedId, setSelectedId] = useState(null);
+  const [search, setSearch] = useState("");
+  const [searchScope, setSearchScope] = useState("list");
+  const [showDone, setShowDone] = useState(false);
+  const [sheet, setSheet] = useState(null); // new | settings | print
+  const [onboarding, setOnboarding] = useState(false);
+  const [banner, setBanner] = useState(null);
+  const [syncLine, setSyncLine] = useState("");
+
+  const toast = useCallback((message, kind = "info", timeout = 5000) => {
+    setBanner({ message, kind, timeout, at: Date.now() });
+  }, []);
+
+  // ------------------------------------------------------------- sort state
+  // Per-list, so "Chores by due date" doesn't reorder every other list too.
+  const sortKey = tag ? `tag:${tag}` : listId ? `list:${listId}` : `smart:${scope}`;
+  const sortBy = (settings.sort_by || {})[sortKey] || "manual";
+
+  const setSortBy = useCallback(
+    async (value) => {
+      const next = { ...(settings.sort_by || {}), [sortKey]: value };
+      const saved = await call("set_settings", { sort_by: next });
+      setSettings(saved);
+    },
+    [settings.sort_by, sortKey]
+  );
+
+  // ----------------------------------------------------------------- loading
+  const globalSearch = Boolean(search) && searchScope === "global";
+
+  const loadRows = useCallback(async () => {
+    const params = {
+      include_completed: showDone,
+      search: search || null,
+      sort: sortBy,
+    };
+    if (!globalSearch) {
+      params.list_id = listId;
+      params.tag = tag;
+      params.scope = scope;
+    }
+    try {
+      setRows(await call("reminders", params));
+    } catch (e) {
+      const err = parseError(e);
+      if (err.code === "SIDECAR_DOWN") {
+        setSidecarDetail(err.detail || err.message);
+        setPhase("gate");
+        setGateStep("sidecar");
+      }
+    }
+  }, [showDone, search, sortBy, globalSearch, listId, tag, scope]);
+
+  const loadShell = useCallback(async () => {
+    const [l, t, c] = await Promise.all([
+      call("lists"),
+      call("tags"),
+      call("smart_counts"),
+    ]);
+    setLists(l);
+    setTags(t);
+    setCounts(c);
+  }, []);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const st = await call("sync_status");
+      setStatus(st);
+      setConflicts(st.conflicts ? await call("conflicts") : []);
+    } catch {
+      /* status is cosmetic */
+    }
+  }, []);
+
+  const refreshAll = useCallback(async () => {
+    await loadShell();
+    await loadRows();
+    await refreshStatus();
+  }, [loadShell, loadRows, refreshStatus]);
+
+  // ------------------------------------------------------------------- boot
+  const boot = useCallback(async () => {
+    try {
+      const st = await call("auth_status");
+      let cfg = {};
+      try {
+        cfg = await call("settings");
+        setSettings(cfg);
+        applyTheme(cfg.theme);
+        setSearchScope(cfg.search_scope || "list");
+      } catch {
+        /* defaults are fine */
+      }
+
+      if (st.authenticated || st.has_cache) {
+        setPhase("app");
+        await refreshAll();
+        if (!st.authenticated) {
+          toast("Your iCloud session expired — sign in again to sync.", "warn", 0);
+        } else if (!cfg.onboarded) {
+          setOnboarding(true);
+        }
+        return;
+      }
+      setPhase("gate");
+      setGateStep("login");
+    } catch (e) {
+      const err = parseError(e);
+      setPhase("gate");
+      if (err.code === "SIDECAR_DOWN") {
+        setSidecarDetail(err.detail || err.message);
+        setGateStep("sidecar");
+      } else {
+        setGateStep("login");
+        setGateError(err.message);
+      }
+    }
+  }, [refreshAll, toast]);
+
+  useEffect(() => {
+    boot();
+    // Intentionally once: boot re-runs via sidecar events, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (phase === "app") loadRows();
+  }, [phase, loadRows]);
+
+  // ----------------------------------------------------------------- events
+  useEffect(() => {
+    const offs = [
+      listen("sidecar://sync_finished", async () => {
+        await refreshAll();
+        setSyncLine("");
+      }),
+      listen("sidecar://sync_progress", (e) => {
+        const d = e.payload || {};
+        if (d.stage === "reminders") {
+          setSyncLine(`Syncing ${d.index}/${d.of} — ${d.total} reminders`);
+        }
+      }),
+      listen("sidecar://sync_error", (e) => {
+        const err = e.payload || {};
+        if (err.code === "AUTH_REQUIRED") {
+          toast("Your iCloud session expired — sign in again to sync.", "warn", 0);
+        } else if (err.code === "TERMS_REQUIRED") {
+          toast("Apple needs you to accept updated iCloud terms.", "warn", 0);
+        } else {
+          toast(err.message || "Sync failed.", "warn");
+        }
+      }),
+      listen("sidecar://conflict", refreshStatus),
+      listen("sidecar://ready", boot),
+      listen("sidecar://restarted", () => {
+        toast("Sync service reconnected.", "ok", 3000);
+        boot();
+      }),
+      listen("sidecar://died", (e) => {
+        const err = (e.payload || {}).error || "";
+        if (phase === "app") toast("The sync service stopped. Reconnecting…", "warn", 0);
+        else {
+          setSidecarDetail(err);
+          setPhase("gate");
+          setGateStep("sidecar");
+        }
+      }),
+      listen("app://notified", () => {
+        loadRows();
+        loadShell();
+      }),
+    ];
+    return () => offs.forEach((off) => off());
+  }, [boot, loadRows, loadShell, refreshAll, refreshStatus, toast, phase]);
+
+  useEffect(() => {
+    const id = setInterval(refreshStatus, 15000);
+    return () => clearInterval(id);
+  }, [refreshStatus]);
+
+  // -------------------------------------------------------------- selection
+  const select = useCallback((next) => {
+    setScope(next.scope ?? null);
+    setListId(next.listId ?? null);
+    setTag(next.tag ?? null);
+    setSelectedId(null);
+  }, []);
+
+  const current = useMemo(() => {
+    if (globalSearch) return { text: "All Reminders", color: "" };
+    if (tag) return { text: `#${tag}`, color: "" };
+    if (listId) {
+      const l = lists.find((x) => x.id === listId);
+      return { text: l ? l.title : "Reminders", color: (l && l.color_hex) || "" };
+    }
+    const s = SMART.find((x) => x.key === scope);
+    return { text: s ? s.label : "Reminders", color: s ? s.color : "" };
+  }, [globalSearch, tag, listId, lists, scope]);
+
+  // --------------------------------------------------------------- mutations
+  const mutate = useCallback(
+    async (fn) => {
+      await fn();
+      await loadRows();
+      await loadShell();
+    },
+    [loadRows, loadShell]
+  );
+
+  const selected = useMemo(
+    () => rows.find((r) => r.id === selectedId) || null,
+    [rows, selectedId]
+  );
+
+  // -------------------------------------------------------------- shortcuts
+  const searchRef = useRef(null);
+  useEffect(() => {
+    const onKey = (ev) => {
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(
+        document.activeElement?.tagName || ""
+      );
+      const mod = ev.ctrlKey || ev.metaKey;
+      if (phase !== "app") return;
+      if (mod && ev.key.toLowerCase() === "n") {
+        ev.preventDefault();
+        setSheet("new");
+      } else if (mod && ev.key.toLowerCase() === "f") {
+        ev.preventDefault();
+        searchRef.current?.open();
+      } else if (mod && ev.key.toLowerCase() === "p") {
+        ev.preventDefault();
+        setSheet("print");
+      } else if (mod && ev.key === ",") {
+        ev.preventDefault();
+        setSheet("settings");
+      } else if (ev.key === "n" && !typing && !sheet) {
+        ev.preventDefault();
+        setSheet("new");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [phase, sheet]);
+
+  // ------------------------------------------------------------------ render
+  if (phase !== "app") {
+    return (
+      <Gate
+        step={gateStep}
+        setStep={setGateStep}
+        error={gateError}
+        setError={setGateError}
+        sidecarDetail={sidecarDetail}
+        setSidecarDetail={setSidecarDetail}
+        onSignedIn={boot}
+      />
+    );
+  }
+
+  return (
+    <>
+      <div className="app">
+        <Sidebar
+          smart={SMART}
+          counts={counts}
+          lists={lists}
+          tags={tags}
+          scope={scope}
+          listId={listId}
+          tag={tag}
+          onSelect={select}
+          status={status}
+          syncLine={syncLine}
+          onSync={async () => {
+            await call("sync", {});
+            toast("Syncing…", "info", 2000);
+          }}
+          onSettings={() => setSheet("settings")}
+        />
+
+        <ListPane
+          ref={searchRef}
+          title={current}
+          rows={rows}
+          lists={lists}
+          scope={scope}
+          listId={listId}
+          globalSearch={globalSearch}
+          search={search}
+          setSearch={setSearch}
+          searchScope={searchScope}
+          onToggleSearchScope={async () => {
+            const next = searchScope === "global" ? "list" : "global";
+            setSearchScope(next);
+            setSettings(await call("set_settings", { search_scope: next }));
+          }}
+          showDone={showDone}
+          setShowDone={setShowDone}
+          sortBy={sortBy}
+          setSortBy={setSortBy}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          onNew={() => setSheet("new")}
+          onPrint={() => setSheet("print")}
+          onToggleComplete={(r, done) =>
+            mutate(() => call("update_reminder", { id: r.id, completed: done }))
+          }
+          onRestore={(r) =>
+            mutate(async () => {
+              await call("restore_reminder", { id: r.id });
+              toast("Restored.", "ok", 2500);
+            })
+          }
+        />
+
+        <Detail
+          reminder={selected}
+          lists={lists}
+          onSave={(patch) =>
+            mutate(async () => {
+              await call("update_reminder", patch);
+              toast("Saved.", "ok", 2000);
+            })
+          }
+          onDelete={(r) =>
+            mutate(async () => {
+              await call("delete_reminder", { id: r.id });
+              setSelectedId(null);
+            })
+          }
+        />
+      </div>
+
+      {sheet === "new" && (
+        <NewReminderSheet
+          lists={lists}
+          defaultListId={settings.default_list_id || listId}
+          onClose={() => setSheet(null)}
+          onCreate={(payload) =>
+            mutate(() => call("create_reminder", payload)).then(() => setSheet(null))
+          }
+        />
+      )}
+
+      {sheet === "settings" && (
+        <SettingsSheet
+          settings={settings}
+          setSettings={setSettings}
+          lists={lists}
+          appleId={status.apple_id}
+          onClose={() => setSheet(null)}
+          onFullSync={async () => {
+            await call("sync", { full: true });
+            setSheet(null);
+            toast("Re-downloading everything…", "info", 4000);
+          }}
+          onSignOut={async () => {
+            await call("sign_out", {});
+            setSheet(null);
+            setPhase("gate");
+            setGateStep("login");
+          }}
+          onThemeChange={applyTheme}
+        />
+      )}
+
+      {sheet === "print" && (
+        <PrintSheet
+          settings={settings}
+          setSettings={setSettings}
+          title={current.text}
+          lists={lists}
+          query={{
+            include_completed: showDone,
+            search: search || null,
+            ...(globalSearch ? {} : { list_id: listId, tag, scope }),
+          }}
+          onClose={() => setSheet(null)}
+        />
+      )}
+
+      {onboarding && (
+        <Onboarding
+          settings={settings}
+          setSettings={setSettings}
+          syncLine={syncLine}
+          counts={counts}
+          lists={lists}
+          onDone={() => setOnboarding(false)}
+        />
+      )}
+
+      <Banner
+        banner={banner}
+        conflicts={conflicts}
+        onResolve={async (id, keep) => {
+          await call("resolve_conflict", { id, keep });
+          await refreshAll();
+        }}
+        onDismiss={() => setBanner(null)}
+      />
+    </>
+  );
+}

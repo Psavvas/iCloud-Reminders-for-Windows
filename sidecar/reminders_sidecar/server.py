@@ -115,6 +115,7 @@ class Server:
             scope=p.get("scope"),
             include_completed=bool(p.get("include_completed")),
             search=p.get("search"),
+            sort=p.get("sort"),
             limit=int(p.get("limit") or 1000),
         )
 

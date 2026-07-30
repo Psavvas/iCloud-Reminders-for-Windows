@@ -46,7 +46,7 @@
     theme: "system", sync_minutes: 10, notifications_enabled: true,
     stale_after_minutes: 60, max_individual_toasts: 3,
     default_list_id: null, search_scope: "list",
-    onboarded: true, print_group_by: "due",
+    onboarded: true, print_group_by: "due", sort_by: {},
     print_include_notes: true, print_include_completed: false,
   };
 
@@ -55,8 +55,12 @@
   };
 
   const handlers = {
-    auth_status: () => ({ authenticated: true, apple_id: "you@icloud.com", has_cache: true }),
-    settings: () => ({ ...settings }),
+    auth_status: () => ({
+      authenticated: !window.__MOCK_SIGNED_OUT,
+      apple_id: "you@icloud.com",
+      has_cache: !window.__MOCK_SIGNED_OUT,
+    }),
+    settings: () => ({ ...settings, onboarded: !window.__MOCK_ONBOARD }),
     set_settings: (p) => Object.assign(settings, p),
     smart_counts: () => {
       const t = startOfTomorrow();
@@ -96,12 +100,23 @@
         const q = p.search.toLowerCase();
         rows = rows.filter((r) => r.title.toLowerCase().includes(q));
       }
-      return rows.sort((a, b) => {
+      const byDue = (a, b) => {
         if (!a.due_date && !b.due_date) return 0;
         if (!a.due_date) return 1;
         if (!b.due_date) return -1;
         return new Date(a.due_date) - new Date(b.due_date);
-      });
+      };
+      const rank = (p) => ({ 1: 0, 5: 1, 9: 2 }[Number(p)] ?? 3);
+      const cmp = {
+        title: (a, b) => a.title.localeCompare(b.title),
+        priority: (a, b) => rank(a.priority) - rank(b.priority) || byDue(a, b),
+        created: (a, b) => String(b.id).localeCompare(String(a.id)),
+        due: byDue,
+      }[p.sort] || byDue;
+      rows = rows.sort(cmp);
+      // The Completed view is capped server-side.
+      if (p.scope === "completed") rows = rows.slice(0, 50);
+      return rows;
     },
     reminder: (p) => REMINDERS.find((r) => r.id === p.id) || null,
     sync_status: () => ({
