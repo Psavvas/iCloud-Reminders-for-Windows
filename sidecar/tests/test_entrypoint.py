@@ -101,3 +101,35 @@ def test_build_script_runs_the_sidecar_check_first():
     """The bundler's own failure for a missing resource is not actionable."""
     pkg = json.loads((ROOT / "package.json").read_text())
     assert "check-sidecar.mjs" in pkg["scripts"]["build"]
+
+
+def test_tauri_hook_paths_are_relative_to_the_project_root():
+    """
+    Tauri runs beforeDev/beforeBuild from the project root, not from
+    src-tauri. A "../" prefix there resolves one directory too high and the
+    build fails with ENOENT on a path outside the repo.
+    """
+    conf = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text())
+    for key in ("beforeDevCommand", "beforeBuildCommand"):
+        cmd = conf.get("build", {}).get(key)
+        if not cmd:
+            continue
+        assert "../" not in cmd and "..\\" not in cmd, (
+            f"{key} walks out of the project root: {cmd}"
+        )
+        # The referenced directory must exist relative to the root.
+        for token in cmd.split():
+            if token.startswith("src-"):
+                assert (ROOT / token).is_dir(), f"{key} points at a missing {token}"
+
+
+def test_the_ui_is_built_before_the_bundle():
+    """
+    Vite has to produce dist/ before Tauri bundles it. That step now lives in
+    the npm script rather than a Tauri hook, so its working directory is npm's
+    and therefore predictable.
+    """
+    pkg = json.loads((ROOT / "package.json").read_text())
+    build = pkg["scripts"]["build"]
+    assert "src-react run build" in build
+    assert build.index("src-react run build") < build.index("tauri build")

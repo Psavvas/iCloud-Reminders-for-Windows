@@ -6,8 +6,7 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm --prefix ../src-react run dev",
-    "beforeBuildCommand": "npm --prefix ../src-react run build"
+    "beforeDevCommand": "npm --prefix src-react run dev"
   },
   "app": {
     "withGlobalTauri": true,

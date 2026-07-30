@@ -5,7 +5,7 @@
   "description": "iCloud Reminders for Windows",
   "scripts": {
     "dev": "tauri dev",
-    "build": "node scripts/check-sidecar.mjs && tauri build",
+    "build": "node scripts/check-sidecar.mjs && npm --prefix src-react run build && tauri build",
     "ui": "npm --prefix src-react run dev",
     "tauri": "tauri",
     "postinstall": "npm --prefix src-react install"
