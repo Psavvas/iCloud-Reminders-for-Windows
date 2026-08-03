@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { call, invoke } from "../bridge.js";
 import AppMark from "./AppMark.jsx";
+import SyncBar from "./SyncBar.jsx";
 
 const STEPS = 4;
 
-export default function Onboarding({ settings, setSettings, syncLine, counts, lists, onDone }) {
+export default function Onboarding({ settings, setSettings, sync, counts, lists, onDone }) {
   const [step, setStep] = useState(0);
   const [autostart, setAutostart] = useState(false);
   const [autostartOk, setAutostartOk] = useState(true);
@@ -33,12 +34,17 @@ export default function Onboarding({ settings, setSettings, syncLine, counts, li
                 Your iCloud reminders, on Windows — with due-date notifications
                 Apple doesn't give you here.
               </p>
-              <p className="hint">
-                {syncLine ||
-                  (counts.all
+              {/* The first sync is the longest one anybody sits through, so it
+                  gets the bar rather than a line of text that never moves. */}
+              {sync ? (
+                <SyncBar sync={sync} />
+              ) : (
+                <p className="hint">
+                  {counts.all
                     ? `${counts.all} reminders across ${lists.length} lists — ready.`
-                    : "Downloading your reminders…")}
-              </p>
+                    : "Downloading your reminders…"}
+                </p>
+              )}
             </section>
           )}
 

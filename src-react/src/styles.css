@@ -395,12 +395,81 @@ code {
 .chip:hover { background: var(--fill-2); }
 .chip.active { background: var(--blue); color: #fff; }
 
-.sync-status {
+/* Pinned to the bottom of the sidebar. Holds either the progress bar or the
+   idle "Synced 14:02" line -- never both, so the sidebar doesn't reflow when a
+   sync starts. */
+.sync-foot {
   margin-top: auto;
+  border-top: 1px solid var(--hairline);
+}
+.sync-status {
   padding: 11px 16px;
   font-size: 11.5px;
   color: var(--muted);
-  border-top: 1px solid var(--hairline);
+}
+
+.sync-bar { padding: 9px 16px 11px; }
+.sync-bar-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.sync-bar-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sync-bar-right {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums; /* stops the % jittering as it counts up */
+  color: var(--text);
+}
+.sync-bar-sub {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--muted);
+  /* List names are longer than the sidebar is wide; losing the tail here is
+     cheaper than losing the percentage above. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--fill-2);
+  overflow: hidden;
+}
+.sync-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--blue);
+  transition: width 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+/* A delta sync's size isn't known, so the bar sweeps instead of filling. */
+.sync-track.indeterminate .sync-fill {
+  width: 35%;
+  transition: none;
+  animation: sync-sweep 1.15s ease-in-out infinite;
+}
+@keyframes sync-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(320%); }
+}
+
+.icon-btn.spinning { animation: spin 1.1s linear infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sync-fill { transition: none; }
+  .sync-track.indeterminate .sync-fill { animation-duration: 2.4s; }
+  .icon-btn.spinning { animation: none; }
 }
 
 /* list pane -------------------------------------------------------------- */

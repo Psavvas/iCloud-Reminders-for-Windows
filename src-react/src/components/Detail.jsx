@@ -60,6 +60,12 @@ export default function Detail({ reminder, lists, onSave, onDelete }) {
             Clear
           </button>
         </div>
+        {reminder.all_day && (
+          <p className="hint tiny">
+            All-day reminder — it has a date but no time. Saving a time here
+            turns it into a timed one.
+          </p>
+        )}
 
         <label htmlFor="d-prio">Priority</label>
         <select

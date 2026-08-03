@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .db import Cache, from_iso, to_iso, utcnow
-from .icloud import AuthRequired, ICloudClient, SidecarError
+from .icloud import AuthRequired, ICloudClient, SidecarError, TwoFactorRequired
 from .notifications import plan_notifications
 from .sync import CURSOR_KEY, LAST_SYNC_KEY, SyncEngine
 
@@ -78,8 +78,51 @@ class Server:
             "due_notifications": self.m_due_notifications,
             "conflicts": lambda p: self.cache.conflicts(),
             "resolve_conflict": self.m_resolve_conflict,
+            "due_probe": self.m_due_probe,
             "shutdown": self.m_shutdown,
         }
+
+    def m_due_probe(self, p: dict) -> dict:
+        """
+        Dump what iCloud actually stores in DueDate, both ways round.
+
+        Backs `scripts/check-due-dates.py`. The wall-clock reading and the
+        instant reading differ by the local UTC offset, so comparing them
+        against what an iPhone shows settles which one Apple means -- rather
+        than the app assuming and being wrong by four hours or a whole day.
+        """
+        from .timeutil import floating_to_instant, local_zone
+
+        svc = self.client._service()  # noqa: SLF001 - diagnostic, by design
+        rows: list[dict] = []
+        for l in self.client.lists():
+            if l.get("is_group") or len(rows) >= int(p.get("limit") or 12):
+                continue
+            batch = svc.list_reminders(
+                list_id=l["id"], include_completed=False, results_limit=50
+            )
+            for r in batch.reminders:
+                if r.due_date is None or r.deleted:
+                    continue
+                raw = r.due_date.astimezone(timezone.utc)
+                rows.append(
+                    {
+                        "list": l["title"],
+                        "title": (r.title or "")[:48],
+                        "all_day": bool(r.all_day),
+                        "time_zone": r.time_zone,
+                        "raw_ms": int(raw.timestamp() * 1000),
+                        "raw_utc": raw.isoformat(),
+                        # What the app shows now, and what it showed before.
+                        "as_wall_clock": floating_to_instant(
+                            r.due_date, r.time_zone
+                        ).astimezone().isoformat(),
+                        "as_instant": raw.astimezone().isoformat(),
+                    }
+                )
+                if len(rows) >= int(p.get("limit") or 12):
+                    break
+        return {"zone": str(local_zone()), "reminders": rows}
 
     # auth ------------------------------------------------------------------
     def m_auth_status(self, p: dict) -> dict:
@@ -96,9 +139,21 @@ class Server:
             self.apple_id = apple_id
             self.client.apple_id = apple_id
         self.cache.set_meta("apple_id", apple_id)
-        st = self.client.connect(
-            password=p.get("password"), accept_terms=bool(p.get("accept_terms"))
-        )
+
+        password = p.get("password")
+        remember = self.cache.get_settings().get("remember_password", True)
+        try:
+            st = self.client.connect(
+                password=password, accept_terms=bool(p.get("accept_terms"))
+            )
+        except TwoFactorRequired:
+            # The password itself was accepted -- 2FA is the *second* factor --
+            # so it is worth keeping even though this call is about to fail.
+            if password and remember:
+                self.client.remember_password(password)
+            raise
+        if password and remember:
+            self.client.remember_password(password)
         self._kick_sync(full=not self.cache.lists())
         return st
 
@@ -106,6 +161,31 @@ class Server:
         st = self.client.submit_2fa(p["code"])
         self._kick_sync(full=not self.cache.lists())
         return st
+
+    def _restore_session(self) -> None:
+        """
+        Try to pick up where the last run left off, in the background.
+
+        Without this the sidecar starts with no session at all and reports
+        "not authenticated" on every launch, so the app asks for a password each
+        time even though the stored session was still good. It runs off-thread
+        because it talks to Apple and the stdio loop must stay responsive.
+        """
+        if self.client.connected or not self.apple_id:
+            return
+
+        # Set before the thread starts: the UI calls auth_status the moment it
+        # sees `ready`, and a False here would send it to the sign-in form for
+        # the split second before the restore reports in.
+        self.client.restoring = True
+
+        def run():
+            ok = self.client.restore()
+            self.emit("auth_changed", self.client.status())
+            if ok:
+                self._kick_sync(full=not self.cache.lists())
+
+        threading.Thread(target=run, daemon=True, name="restore").start()
 
     # reads -----------------------------------------------------------------
     def m_reminders(self, p: dict) -> list[dict]:
@@ -124,6 +204,9 @@ class Server:
         Drop the session but keep the cache, so the app still shows data while
         signed out. Passing purge=true clears the cached reminders too.
         """
+        # Signing out has to clear the saved credential too, or the next launch
+        # would silently sign straight back in.
+        self.client.forget_password()
         self.client = ICloudClient(self.apple_id, cookie_dir=self.client.cookie_dir)
         self.sync = SyncEngine(self.cache, self.client, emit=self.emit)
         if p.get("purge"):
@@ -240,7 +323,7 @@ class Server:
     def _kick_push(self) -> None:
         def run():
             try:
-                self.sync.flush_outbox()
+                self.sync.push_now()
             except SidecarError as exc:
                 self.emit("sync_error", exc.to_dict())
             except Exception as exc:  # noqa: BLE001
@@ -293,6 +376,7 @@ class Server:
     # ------------------------------------------------------------------ loop
     def serve(self) -> int:
         self.emit("ready", {"apple_id": self.apple_id})
+        self._restore_session()
         for line in sys.stdin:
             if self._stop.is_set():
                 break

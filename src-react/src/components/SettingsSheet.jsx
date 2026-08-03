@@ -138,6 +138,17 @@ export default function SettingsSheet({
             Sign Out
           </button>
         </div>
+        <Switch
+          label="Stay signed in"
+          checked={settings.remember_password !== false}
+          onChange={(v) => save({ remember_password: v })}
+        />
+        <p className="hint tiny">
+          Keeps your password in Windows Credential Manager so the app can
+          rebuild its session when iCloud expires it — which Apple does every
+          few weeks. Turn this off and you'll be asked to sign in again each
+          time. Signing out clears it either way.
+        </p>
       </div>
 
       <div className="sheet-actions">

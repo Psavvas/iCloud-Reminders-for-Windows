@@ -151,6 +151,26 @@ await shoot("07-new-reminder", {
 
 await shoot("08-today", { prep: (p) => clickRow(p, "Today") });
 
+// Sync progress. The bar only exists while a sync is running, so the events the
+// sidecar would send are dispatched by hand.
+await shoot("17-sync-progress", {
+  prep: async (page) => {
+    await selectInbox(page);
+    await page.evaluate(() => {
+      window.__emit("sidecar://sync_started", { mode: "full", determinate: true });
+    });
+    // The estimate is elapsed-time-derived and suppressed while that is too
+    // small to divide by, so let real seconds pass before the progress event.
+    await page.waitForTimeout(7000);
+    await page.evaluate(() => {
+      window.__emit("sidecar://sync_progress", {
+        stage: "reminders", list: "STEM Precalculus Honors",
+        done: 3, of: 13, total: 412, percent: 15.2,
+      });
+    });
+  },
+});
+
 await shoot("15-upcoming-dates", { prep: (p) => clickRow(p, "Upcoming") });
 
 await shoot("16-sort-menu", {
@@ -199,6 +219,13 @@ await shoot("12-onboarding", {
       await page.waitForTimeout(250);
     }
   },
+});
+
+await shoot("18-restoring", {
+  width: 900,
+  height: 620,
+  flags: { __MOCK_RESTORING: true },
+  prep: (page) => page.waitForSelector(".gate-step", { timeout: 10000 }),
 });
 
 await shoot("05-signin", {

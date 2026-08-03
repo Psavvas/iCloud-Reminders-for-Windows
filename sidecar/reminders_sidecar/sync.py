@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from .db import Cache, to_iso, utcnow
-from .icloud import ConflictError, ICloudClient, SidecarError
+from .icloud import AuthRequired, ConflictError, ICloudClient, SidecarError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ class SyncEngine:
         with self._lock:
             self._running = True
             try:
-                self.emit("sync_started", {"mode": "full"})
+                self.emit("sync_started", {"mode": "full", "determinate": True})
 
                 # Take the cursor BEFORE reading, so anything that changes while
                 # we page through is picked up by the next delta rather than lost.
@@ -70,25 +70,46 @@ class SyncEngine:
 
                 lists = self.client.lists()
                 self.cache.replace_lists(lists)
-                self.emit("sync_progress", {"stage": "lists", "count": len(lists)})
+
+                # Progress is weighted by each list's reminder count rather than
+                # counting lists, because the work is wildly uneven -- one list
+                # on the account this was built against holds 1,219 of the 2,900
+                # records. A bar that moves in equal steps per list would sit at
+                # 90% for most of the sync.
+                work = [l for l in lists if not l.get("is_group")]
+                weights = [max(int(l.get("count") or 0), 1) for l in work]
+                budget = sum(weights) or 1
+                self.emit(
+                    "sync_progress",
+                    {
+                        "stage": "lists",
+                        "count": len(lists),
+                        "expected": sum(int(l.get("count") or 0) for l in work),
+                        "percent": 0.0,
+                        "done": 0,
+                        "of": len(work),
+                    },
+                )
 
                 total = 0
-                for i, l in enumerate(lists):
-                    if l.get("is_group"):
-                        continue  # groups hold no reminders of their own
+                spent = 0
+                for i, l in enumerate(work):
                     reminders, tags_by = self.client.reminders_for(l["id"])
                     self.cache.upsert_reminders(reminders)
                     for rid, tags in tags_by.items():
                         self.cache.replace_tags_for(rid, tags)
                     total += len(reminders)
+                    spent += weights[i]
                     self.emit(
                         "sync_progress",
                         {
                             "stage": "reminders",
                             "list": l["title"],
                             "index": i + 1,
-                            "of": len(lists),
+                            "done": i + 1,
+                            "of": len(work),
                             "total": total,
+                            "percent": round(100.0 * spent / budget, 1),
                         },
                     )
 
@@ -111,15 +132,22 @@ class SyncEngine:
         with self._lock:
             self._running = True
             try:
-                self.emit("sync_started", {"mode": "delta"})
+                # A delta has no measurable size until the changes come back, so
+                # the bar animates rather than lying about a percentage.
+                self.emit("sync_started", {"mode": "delta", "determinate": False})
 
                 # Lists never appear in the delta stream -- always refresh them.
                 lists = self.client.lists()
                 self.cache.replace_lists(lists)
+                self.emit("sync_progress", {"stage": "lists", "count": len(lists)})
 
                 changes = self.client.changes_since(cursor)
                 updated = [c for c in changes if not c.get("deleted")]
                 deleted = [c for c in changes if c.get("deleted")]
+                self.emit(
+                    "sync_progress",
+                    {"stage": "changes", "total": len(changes)},
+                )
 
                 if updated:
                     self.cache.upsert_reminders(updated)
@@ -185,10 +213,15 @@ class SyncEngine:
         finally:
             self._push_lock.release()
 
+    def push_now(self) -> dict:
+        """A push on its own, with the same expired-session recovery as a sync."""
+        return self._with_reauth(self.flush_outbox)
+
     def _drain(self) -> dict:
         pushed = 0
         conflicts = 0
         failed = 0
+        expired: Optional[SidecarError] = None
 
         for item in self.cache.pending():
             seq = item["seq"]
@@ -240,12 +273,40 @@ class SyncEngine:
                 self.emit("push_failed", {"reminder_id": rid, "error": exc.to_dict()})
                 # Auth problems will fail every remaining item too; stop early.
                 if exc.code in ("AUTH_REQUIRED", "2FA_REQUIRED", "TERMS_REQUIRED"):
+                    # An expired session is recoverable, so it has to escape this
+                    # loop rather than being absorbed into a failure count --
+                    # otherwise the caller never learns there is anything to
+                    # retry. The item stays queued; only its attempt count moved.
+                    if exc.code == "AUTH_REQUIRED":
+                        expired = exc
                     break
 
+        if expired is not None:
+            raise expired
         return {"pushed": pushed, "conflicts": conflicts, "failed": failed}
 
     def sync_now(self, full: bool = False) -> dict:
         """Push first, then pull, so local edits aren't clobbered by our own pull."""
-        push = self.flush_outbox()
-        pull = self.full_sync() if full else self.delta_sync()
+        push = self._with_reauth(self.flush_outbox)
+        pull = self._with_reauth(self.full_sync if full else self.delta_sync)
         return {"push": push, "pull": pull}
+
+    def _with_reauth(self, fn: Callable[[], dict]) -> dict:
+        """
+        Run a sync step, rebuilding the session once if Apple has expired it.
+
+        iCloud session tokens do not last forever, and the old behaviour was to
+        surface that as "sign in again" on a timer -- every background pass after
+        expiry threw the user back to the login screen. A restore uses the saved
+        credential and the trust token, so it needs nothing from them. Only one
+        retry: if the second attempt still fails, the session really is gone and
+        the sign-in prompt is the honest answer.
+        """
+        try:
+            return fn()
+        except AuthRequired:
+            if not self.client.restore():
+                raise
+            LOGGER.info("iCloud session restored; retrying %s", getattr(fn, "__name__", fn))
+            self.emit("auth_changed", self.client.status())
+            return fn()

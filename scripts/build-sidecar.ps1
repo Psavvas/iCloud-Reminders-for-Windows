@@ -65,6 +65,11 @@ try {
         "--collect-all", "keyring",
         "--collect-all", "fido2",
         "--collect-all", "srp",
+        # tzdata is a pure data package -- zoneinfo has no tz database to fall
+        # back on under Windows, so without this every named zone fails to
+        # resolve and due dates land back on a fixed offset.
+        "--collect-all", "tzdata",
+        "--collect-all", "tzlocal",
         "--hidden-import", "keyring.backends.Windows",
         "--hidden-import", "win32timezone",
         "sidecar\run_sidecar.py"

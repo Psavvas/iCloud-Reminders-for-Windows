@@ -47,9 +47,11 @@ function Row({ r, lists, showList, selected, onSelect, onToggle, onRestore, inTr
             </span>
           )}
           {r.due_date && (
-            <span className={`due ${dueClass(r.due_date, r.completed)}`}>
+            <span className={`due ${dueClass(r.due_date, r.completed, r.all_day)}`}>
               {/* Under a dated heading the date is redundant; show the time. */}
-              {dateOnly ? formatTime(r.due_date) : formatDue(r.due_date)}
+              {dateOnly
+                ? formatTime(r.due_date, r.all_day)
+                : formatDue(r.due_date, r.all_day)}
             </span>
           )}
           {showList &&

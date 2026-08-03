@@ -62,9 +62,18 @@ class FakeClient:
         self.deleted: list[str] = []
         self.remote_tags = {}
         self.fail_with = None
+        self.connected = True
 
     def lists(self):
         return list(self.lists_data)
+
+    # Part of the ICloudClient interface the sync engine leans on when a
+    # session expires mid-pass. The default fake has nothing to restore from.
+    def restore(self):
+        return False
+
+    def status(self):
+        return {"authenticated": self.connected, "apple_id": "a@b.c"}
 
     def reminders_for(self, list_id):
         return list(self.reminders_data.get(list_id, [])), dict(
@@ -136,6 +145,55 @@ def test_full_sync_reports_progress(rig):
     engine.full_sync()
     stages = [d.get("stage") for e, d in events if e == "sync_progress"]
     assert "lists" in stages and "reminders" in stages
+
+
+def test_progress_is_weighted_by_list_size_not_list_count(rig):
+    """
+    The bar has to move at the rate work is done. On a real account one list
+    holds 1,219 of 2,900 reminders, so a percentage counting lists would sit at
+    50% through the small one and then stall for the whole long download.
+    """
+    _cache, client, engine, events = rig
+    client.lists_data = [
+        {"id": "List/S", "title": "Small", "count": 10},
+        {"id": "List/B", "title": "Big", "count": 990},
+    ]
+    client.reminders_data = {"List/S": [], "List/B": []}
+
+    engine.full_sync()
+    pcts = [d["percent"] for e, d in events if e == "sync_progress" and "percent" in d]
+
+    assert pcts[0] == 0.0
+    assert pcts[-1] == 100.0
+    assert pcts == sorted(pcts)  # never goes backwards
+    # One list of two done, but only 1% of the reminders.
+    assert pcts[1] == pytest.approx(1.0, abs=0.1)
+
+
+def test_progress_survives_lists_that_report_no_count(rig):
+    """A zero-weight list would make the total zero and the percentage a
+    division by zero, so every list counts for at least one unit."""
+    _cache, client, engine, events = rig
+    client.lists_data = [{"id": "List/A", "title": "Inbox", "count": 0}]
+    client.reminders_data = {"List/A": []}
+
+    engine.full_sync()
+    pcts = [d["percent"] for e, d in events if e == "sync_progress" and "percent" in d]
+    assert pcts[-1] == 100.0
+
+
+def test_a_delta_sync_declares_itself_indeterminate(rig):
+    """Its size isn't knowable up front, so the bar must not claim a figure."""
+    _cache, client, engine, events = rig
+    engine.full_sync()
+    events.clear()
+    engine.delta_sync()
+
+    started = [d for e, d in events if e == "sync_started"]
+    assert started == [{"mode": "delta", "determinate": False}]
+    assert all(
+        "percent" not in d for e, d in events if e == "sync_progress"
+    )
 
 
 # ------------------------------------------------------------ delta sync ---
@@ -229,20 +287,64 @@ def test_conflict_is_recorded_and_server_copy_wins_in_cache(rig):
     assert any(e == "conflict" for e, _ in events)
 
 
-def test_auth_failure_stops_draining_the_queue(rig):
-    """One expired session shouldn't burn through every queued edit."""
-    cache, client, engine, _ = rig
-    from reminders_sidecar.icloud import AuthRequired
-
+def _queue_three(cache):
     for i in range(3):
         rid = f"Reminder/{i}"
         cache.upsert_reminders([{"id": rid, "list_id": "List/A", "title": "x"}])
         cache.enqueue(rid, "update", {"title": "y"}, None)
+
+
+def test_auth_failure_stops_draining_the_queue(rig):
+    """
+    One expired session shouldn't burn through every queued edit.
+
+    It surfaces rather than being counted as a failure and swallowed: an
+    expired session is recoverable, and the caller can only retry something it
+    is told about.
+    """
+    cache, client, engine, _ = rig
+    from reminders_sidecar.icloud import AuthRequired
+
+    _queue_three(cache)
     client.fail_with = AuthRequired("session expired")
 
-    out = engine.flush_outbox()
-    assert out["failed"] == 1
+    with pytest.raises(AuthRequired):
+        engine.flush_outbox()
     assert len(cache.pending()) == 3  # nothing dropped
+    assert cache.pending()[0]["attempts"] == 1  # only the first was tried
+
+
+def test_a_push_recovers_from_an_expired_session(rig):
+    """The queued edits go through on the retry, without the user doing anything."""
+    cache, client, engine, _ = rig
+    from reminders_sidecar.icloud import AuthRequired
+
+    _queue_three(cache)
+    client.fail_with = AuthRequired("session expired")
+
+    def restore():
+        client.fail_with = None
+        return True
+
+    client.restore = restore  # type: ignore[assignment]
+
+    out = engine.push_now()
+    assert out["pushed"] == 3
+    assert cache.pending() == []
+
+
+def test_terms_acceptance_is_not_retried(rig):
+    """A restore cannot fix this one, so it must not loop -- the user has to act."""
+    cache, client, engine, _ = rig
+    from reminders_sidecar.icloud import TermsRequired
+
+    _queue_three(cache)
+    client.fail_with = TermsRequired("accept the terms")
+    client.restore = lambda: True  # type: ignore[assignment]
+
+    out = engine.push_now()
+    assert out["failed"] == 1
+    assert len(cache.pending()) == 3
 
 
 def test_transient_failure_keeps_item_queued_for_retry(rig):

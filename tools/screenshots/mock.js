@@ -5,6 +5,15 @@
   const now = new Date();
   const rel = (h) => iso(new Date(now.getTime() + h * 3600 * 1000));
 
+  // A local wall-clock time, which is what the sidecar sends after resolving
+  // Apple's floating due dates. `at(0, 20, 0)` is 8 PM tonight.
+  const at = (dayOffset, hour, minute) => {
+    const d = new Date();
+    d.setDate(d.getDate() + dayOffset);
+    d.setHours(hour, minute, 0, 0);
+    return iso(d);
+  };
+
   const LISTS = [
     { id: "List/G", title: "School", color_hex: null, is_group: 1, open_count: 0, count: 0 },
     { id: "List/CS", title: "AP Computer Science A", color_hex: "#5AC8FA", is_group: 0, open_count: 5 },
@@ -35,6 +44,13 @@
     { id: "R/10", list_id: "List/IN", title: "Cancel TAP ticket", description: "", due_date: rel(-160), priority: 0, completed: 1, dirty: 0, tags: [] },
     { id: "R/11", list_id: "List/IN", title: "Submit KIPR STL reg (old draft)", description: "", due_date: rel(-200), priority: 0, completed: 0, deleted: 1, dirty: 0, tags: [] },
     { id: "R/12", list_id: "List/CHO", title: "Take out recycling", description: "", due_date: null, priority: 0, completed: 0, deleted: 1, dirty: 0, tags: [] },
+    // The two cases the due-date fix is about. Both used to read as overdue:
+    // the 8 PM one because the stored instant was shifted by the UTC offset,
+    // the all-day one because its midnight instant landed on the previous
+    // evening entirely.
+    { id: "R/13", list_id: "List/IN", title: "Reset CSM email", description: "", due_date: at(0, 20, 0), priority: 0, completed: 0, dirty: 0, tags: [] },
+    { id: "R/14", list_id: "List/IN", title: "Pay the water bill", description: "", due_date: at(0, 0, 0), all_day: 1, priority: 5, completed: 0, dirty: 0, tags: [] },
+    { id: "R/15", list_id: "List/IN", title: "Mum's birthday", description: "", due_date: at(2, 0, 0), all_day: 1, priority: 0, completed: 0, dirty: 0, tags: ["personal"] },
   ];
 
   const TAGS = [
@@ -56,9 +72,11 @@
 
   const handlers = {
     auth_status: () => ({
-      authenticated: !window.__MOCK_SIGNED_OUT,
+      authenticated: !window.__MOCK_SIGNED_OUT && !window.__MOCK_RESTORING,
       apple_id: "you@icloud.com",
-      has_cache: !window.__MOCK_SIGNED_OUT,
+      has_cache: !window.__MOCK_SIGNED_OUT && !window.__MOCK_RESTORING,
+      restoring: !!window.__MOCK_RESTORING,
+      can_restore: !!window.__MOCK_RESTORING,
     }),
     settings: () => ({ ...settings, onboarded: !window.__MOCK_ONBOARD }),
     set_settings: (p) => Object.assign(settings, p),
@@ -133,6 +151,13 @@
     login: () => ({ authenticated: true }),
   };
 
+  // A real event bus, so a capture can drive sidecar events -- the sync bar
+  // only exists while one is in flight and cannot be screenshotted otherwise.
+  const subscribers = new Map();
+  window.__emit = (event, payload) => {
+    for (const fn of subscribers.get(event) || []) fn({ payload });
+  };
+
   window.__TAURI__ = {
     core: {
       invoke: async (cmd, args) => {
@@ -145,6 +170,13 @@
         return fn(params || {});
       },
     },
-    event: { listen: async () => () => {} },
+    event: {
+      listen: async (event, fn) => {
+        const list = subscribers.get(event) || [];
+        list.push(fn);
+        subscribers.set(event, list);
+        return () => subscribers.set(event, (subscribers.get(event) || []).filter((x) => x !== fn));
+      },
+    },
   };
 })();

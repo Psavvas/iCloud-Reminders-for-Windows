@@ -538,6 +538,13 @@ class Cache:
             "print_group_by": "due",        # due | priority | none
             "print_include_notes": True,
             "print_include_completed": False,
+            # Keep the Apple ID password in Windows Credential Manager so the
+            # session can be rebuilt without a prompt when iCloud expires it.
+            "remember_password": True,
+            # Sort mode per list/tag/smart view, keyed "list:<id>" and friends.
+            # Must be declared here: set_settings drops keys it has never seen,
+            # so an undeclared setting silently fails to save.
+            "sort_by": {},
         }
         raw = self.get_meta("settings")
         if raw:

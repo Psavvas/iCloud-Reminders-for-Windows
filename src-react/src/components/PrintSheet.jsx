@@ -83,7 +83,7 @@ export default function PrintSheet({ settings, setSettings, title, lists, query,
       html += `<ul class="pv-list">`;
       for (const r of g.items) {
         const bits = [];
-        if (r.due_date) bits.push(esc(formatDue(r.due_date)));
+        if (r.due_date) bits.push(esc(formatDue(r.due_date, r.all_day)));
         if (priorityMarks(r.priority)) bits.push(esc(priorityLabel(r.priority)) + " priority");
         if (groupBy !== "list") {
           const l = lists.find((x) => x.id === r.list_id);

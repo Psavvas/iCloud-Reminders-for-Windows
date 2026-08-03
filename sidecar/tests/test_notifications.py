@@ -116,3 +116,73 @@ def test_undated_reminders_are_never_notified(cache):
         [{"id": "Reminder/x", "list_id": "List/A", "title": "someday"}]
     )
     assert plan_notifications(cache).toasts == []
+
+
+# ------------------------------------------------------ all-day reminders ---
+#
+# An all-day reminder's instant is local midnight. Firing a toast then would put
+# it on a locked screen at 00:00, and treating midnight as its due time made
+# every all-day reminder look like something missed overnight.
+
+
+def add_all_day(cache, day_offset=0, prefix="ad"):
+    """One all-day reminder, due at local midnight `day_offset` days from now."""
+    local_midnight = (
+        (utcnow() + timedelta(days=day_offset))
+        .astimezone()
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+    )
+    cache.upsert_reminders(
+        [
+            {
+                "id": f"Reminder/{prefix}",
+                "list_id": "List/A",
+                "title": "pay the water bill",
+                "due_date": to_iso(local_midnight),
+                "all_day": True,
+                "change_tag": "t",
+            }
+        ]
+    )
+    return local_midnight
+
+
+def test_an_all_day_reminder_does_not_toast_at_midnight(cache):
+    midnight = add_all_day(cache)
+    plan = plan_notifications(cache, now=midnight + timedelta(minutes=1))
+    assert plan.toasts == []
+    # Crucially it is not marked notified either, or the 9am toast would be lost.
+    assert plan.notified_ids == []
+
+
+def test_an_all_day_reminder_toasts_in_the_morning(cache):
+    from reminders_sidecar.timeutil import ALL_DAY_HOUR
+
+    midnight = add_all_day(cache)
+    plan = plan_notifications(cache, now=midnight + timedelta(hours=ALL_DAY_HOUR))
+    assert len(plan.toasts) == 1
+    assert plan.toasts[0].kind == "reminder"
+    # No invented clock time in the body -- it has a date and nothing else.
+    assert ":" not in plan.toasts[0].body
+
+
+def test_an_all_day_reminder_is_not_reported_as_missed_overnight(cache):
+    """
+    Before this, the 00:00 instant was already hours stale by breakfast, so an
+    ordinary all-day reminder arrived as "were due while you were away".
+    """
+    from reminders_sidecar.timeutil import ALL_DAY_HOUR
+
+    midnight = add_all_day(cache)
+    plan = plan_notifications(
+        cache,
+        now=midnight + timedelta(hours=ALL_DAY_HOUR, minutes=5),
+        stale_after_minutes=60,
+    )
+    assert [t.kind for t in plan.toasts] == ["reminder"]
+
+
+def test_a_genuinely_old_all_day_reminder_still_collapses(cache):
+    midnight = add_all_day(cache, day_offset=-3)
+    plan = plan_notifications(cache, now=utcnow(), stale_after_minutes=60)
+    assert [t.kind for t in plan.toasts] == ["summary"]

@@ -1,8 +1,9 @@
 import { useEffect, useRef } from "react";
+import SyncBar from "./SyncBar.jsx";
 
 export default function Sidebar({
   smart, counts, lists, tags, scope, listId, tag,
-  onSelect, status, syncLine, onSync, onSettings,
+  onSelect, status, sync, onSync, onSettings,
 }) {
   const activeRef = useRef(null);
 
@@ -11,28 +12,28 @@ export default function Sidebar({
     activeRef.current?.scrollIntoView({ block: "nearest" });
   }, [listId, scope, tag]);
 
-  const statusText = syncLine
-    ? syncLine
-    : [
-        status.running
-          ? "Syncing…"
-          : status.last_sync
-          ? `Synced ${new Date(status.last_sync).toLocaleTimeString(undefined, {
-              hour: "2-digit",
-              minute: "2-digit",
-            })}`
-          : "Not synced yet",
-        status.pending_pushes ? `${status.pending_pushes} pending` : null,
-      ]
-        .filter(Boolean)
-        .join(" · ");
+  const statusText = [
+    status.last_sync
+      ? `Synced ${new Date(status.last_sync).toLocaleTimeString(undefined, {
+          hour: "2-digit",
+          minute: "2-digit",
+        })}`
+      : "Not synced yet",
+    status.pending_pushes ? `${status.pending_pushes} pending` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <aside className="sidebar">
       <div className="sidebar-head">
         <span className="brand">Reminders</span>
         <div className="head-actions">
-          <button className="icon-btn" title="Sync now" onClick={onSync}>
+          <button
+            className={`icon-btn${sync ? " spinning" : ""}`}
+            title="Sync now"
+            onClick={onSync}
+          >
             ⟳
           </button>
           <button className="icon-btn" title="Settings (Ctrl+,)" onClick={onSettings}>
@@ -102,7 +103,10 @@ export default function Sidebar({
         </p>
       </div>
 
-      <div className="sync-status">{statusText}</div>
+      <div className="sync-foot">
+        <SyncBar sync={sync} />
+        {!sync && <div className="sync-status">{statusText}</div>}
+      </div>
     </aside>
   );
 }

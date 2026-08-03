@@ -12,6 +12,8 @@ Phase 1 findings encoded here:
     on the device, and correcting the encoding did not fix it. Reading works
     fine, so tags are surfaced and filterable but not editable.
   - Reminder deletion is a soft delete (Deleted = 1).
+  - A reminder's DueDate is a wall-clock time encoded as if UTC, not an instant.
+    See timeutil for why, and for the conversion both ways.
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
+
+from .timeutil import floating_to_instant, instant_to_floating
 
 LOGGER = logging.getLogger(__name__)
 
@@ -66,7 +70,13 @@ class ConflictError(SidecarError):
 
 
 def _as_utc(dt: Optional[datetime]) -> Optional[datetime]:
-    """Normalize to tz-aware UTC. Naive values are treated as UTC by Apple."""
+    """
+    Normalize a genuine instant to tz-aware UTC.
+
+    Right for CreationDate, LastModifiedDate and CompletionDate, which Apple
+    sets from a server clock. Wrong for DueDate, which is a wall-clock time --
+    that goes through timeutil instead.
+    """
     if dt is None:
         return None
     if dt.tzinfo is None:
@@ -116,6 +126,7 @@ class ICloudClient:
         self.cookie_dir = cookie_dir
         self._api = None
         self._pending_2fa = False
+        self.restoring = False
 
     # ------------------------------------------------------------------ auth
     @property
@@ -126,6 +137,72 @@ class ICloudClient:
         if not self.connected:
             raise AuthRequired("Not signed in to iCloud")
         return self._api.reminders
+
+    # -- credential storage --------------------------------------------------
+    #
+    # pyicloud reads the password back out of the keyring itself when
+    # PyiCloudService is constructed without one, so remembering it is the whole
+    # mechanism behind a session that survives a restart. Windows Credential
+    # Manager is the backend; nothing is written to disk in the clear.
+    def remember_password(self, password: str) -> bool:
+        if not password:
+            return False
+        try:
+            from pyicloud.utils import store_password_in_keyring
+
+            store_password_in_keyring(self.apple_id, password)
+            return True
+        except Exception as exc:  # noqa: BLE001 - never fail a login over this
+            LOGGER.warning("could not save the password to the keyring: %s", exc)
+            return False
+
+    def forget_password(self) -> None:
+        try:
+            from pyicloud.utils import (
+                delete_password_in_keyring,
+                password_exists_in_keyring,
+            )
+
+            if password_exists_in_keyring(self.apple_id):
+                delete_password_in_keyring(self.apple_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("could not clear the stored password: %s", exc)
+
+    @property
+    def has_saved_password(self) -> bool:
+        if not self.apple_id:
+            return False
+        try:
+            from pyicloud.utils import password_exists_in_keyring
+
+            return bool(password_exists_in_keyring(self.apple_id))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def restore(self) -> bool:
+        """
+        Re-establish a session without asking the user anything.
+
+        Two things make this work: the cookie directory holds a session token
+        pyicloud validates first, and behind it the keyring password plus the
+        trust token let it redo the SRP handshake without a fresh 2FA code.
+        Returns False rather than raising -- a failed restore just means the
+        sign-in screen, not an error worth showing.
+        """
+        if self.connected or not self.apple_id:
+            return self.connected
+        self.restoring = True
+        try:
+            self.connect()
+            return True
+        except SidecarError as exc:
+            LOGGER.info("session restore failed (%s): %s", exc.code, exc.message)
+            return False
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.info("session restore failed: %s", exc)
+            return False
+        finally:
+            self.restoring = False
 
     def connect(self, password: Optional[str] = None, accept_terms: bool = False):
         """
@@ -184,12 +261,21 @@ class ICloudClient:
 
     def status(self) -> dict:
         if self._api is None:
-            return {"authenticated": False, "apple_id": self.apple_id}
+            return {
+                "authenticated": False,
+                "apple_id": self.apple_id,
+                # The UI waits on these instead of flashing the sign-in form at
+                # someone who is already signed in.
+                "restoring": self.restoring,
+                "can_restore": self.has_saved_password,
+            }
         return {
             "authenticated": self.connected,
             "apple_id": self.apple_id,
             "needs_2fa": bool(self._pending_2fa),
             "trusted_session": bool(getattr(self._api, "is_trusted_session", False)),
+            "restoring": self.restoring,
+            "can_restore": self.has_saved_password,
         }
 
     # ----------------------------------------------------------------- reads
@@ -331,7 +417,10 @@ class ICloudClient:
         due = payload.get("due_date")
         if isinstance(due, str):
             due = datetime.fromisoformat(due)
-        due = _as_utc(due)
+        # No TimeZone is written, so the reminder floats and its stored
+        # components are read back as local wall-clock -- what the phone does
+        # for a reminder created on the device.
+        due = instant_to_floating(_as_utc(due))
         try:
             rem = svc.create(
                 list_id=payload["list_id"],
@@ -382,7 +471,12 @@ class ICloudClient:
             due = payload["due_date"]
             if isinstance(due, str):
                 due = datetime.fromisoformat(due)
-            rem.due_date = _as_utc(due)
+            # Re-encoded in whatever zone this record already carries, so
+            # editing a reminder pinned to another zone doesn't quietly move it.
+            rem.due_date = instant_to_floating(_as_utc(due), rem.time_zone)
+            # A time was chosen, so it is no longer an all-day reminder.
+            if due is not None:
+                rem.all_day = False
 
         try:
             svc.update(rem)
@@ -405,7 +499,12 @@ class ICloudClient:
             "list_id": r.list_id,
             "title": r.title or "",
             "description": r.desc or "",
-            "due_date": (_as_utc(r.due_date).isoformat() if r.due_date else None),
+            "due_date": (
+                floating_to_instant(r.due_date, r.time_zone).isoformat()
+                if r.due_date
+                else None
+            ),
+            "time_zone": r.time_zone or None,
             "priority": int(r.priority or 0),
             "completed": bool(r.completed),
             "completed_date": (

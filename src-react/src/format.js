@@ -1,6 +1,14 @@
-/** Display helpers. Everything on the wire is tz-aware UTC; display is local. */
+/**
+ * Display helpers. Everything on the wire is a tz-aware UTC instant; display is
+ * local.
+ *
+ * An all-day reminder's instant is local midnight of its day, which is a
+ * position on the timeline rather than a time anyone chose. So it is never
+ * shown with a clock time, and it does not go late until its day is over --
+ * midnight passing is not the same as being overdue.
+ */
 
-export function formatDue(iso) {
+export function formatDue(iso, allDay = false) {
   if (!iso) return "";
   const d = new Date(iso);
   const sameYear = d.getFullYear() === new Date().getFullYear();
@@ -9,22 +17,32 @@ export function formatDue(iso) {
     day: "numeric",
     month: "short",
     year: sameYear ? undefined : "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
+    hour: allDay ? undefined : "2-digit",
+    minute: allDay ? undefined : "2-digit",
   });
 }
 
-export function formatTime(iso) {
+export function formatTime(iso, allDay = false) {
   if (!iso) return "";
+  if (allDay) return "All Day";
   return new Date(iso).toLocaleTimeString(undefined, {
     hour: "2-digit",
     minute: "2-digit",
   });
 }
 
-export function dueClass(iso, completed) {
+/** Midnight ending the local day that `d` falls in. */
+function endOfDay(d) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  x.setDate(x.getDate() + 1);
+  return x.getTime();
+}
+
+export function dueClass(iso, completed, allDay = false) {
   if (!iso || completed) return "";
-  const due = new Date(iso).getTime();
+  const d = new Date(iso);
+  const due = allDay ? endOfDay(d) : d.getTime();
   const now = Date.now();
   if (due < now) return "overdue";
   if (due < now + 24 * 3600 * 1000) return "soon";
@@ -88,6 +106,49 @@ export function dayHeading(iso) {
     sub: weekday(d),
     order,
   };
+}
+
+/**
+ * "about 2 min left", from elapsed time and how far along we are.
+ *
+ * Two guards, both because a bad estimate is worse than none: nothing before
+ * 8%, since extrapolating from the first list of fourteen swings by minutes
+ * between ticks, and nothing in the first few seconds, when the elapsed time
+ * itself is too small to divide by. A delta sync never gets one -- its size
+ * isn't known in advance.
+ */
+export function etaText(sync) {
+  if (!sync || !sync.determinate || !sync.startedAt) return "";
+  const p = Number(sync.percent) || 0;
+  const elapsed = (Date.now() - sync.startedAt) / 1000;
+  if (p < 8 || p >= 100 || elapsed < 4) return "";
+  const remaining = Math.round((elapsed * (100 - p)) / p);
+  if (remaining < 5) return "almost done";
+  if (remaining < 60) return `about ${Math.max(5, Math.round(remaining / 5) * 5)}s left`;
+  return `about ${Math.round(remaining / 60)} min left`;
+}
+
+/**
+ * The headline, kept short enough not to truncate. List names are long and the
+ * sidebar is narrow, so the name goes on the second line where losing its tail
+ * costs nothing.
+ */
+export function syncLabel(sync) {
+  if (!sync) return "";
+  if (sync.stage === "lists") return "Reading lists…";
+  if (sync.stage === "changes") return "Applying changes…";
+  if (sync.stage === "reminders" && sync.of) {
+    return `${sync.done} of ${sync.of} lists`;
+  }
+  return sync.determinate ? "Syncing…" : "Checking for changes…";
+}
+
+/** Second line: what it's on right now, and how long that leaves. */
+export function syncDetail(sync) {
+  if (!sync) return "";
+  const eta = etaText(sync);
+  const count = sync.total ? `${sync.total.toLocaleString()} reminders` : "";
+  return [sync.list || count, eta].filter(Boolean).join(" · ");
 }
 
 export const SORTS = [

@@ -66,6 +66,24 @@ def test_build_script_freezes_the_entrypoint_not_the_package_main():
     assert '"--collect-all", "fido2"' in script
 
 
+def test_build_script_bundles_the_timezone_database():
+    """
+    Windows has no system tz database, so zoneinfo depends entirely on the
+    tzdata package. Freeze without it and every named zone fails to resolve --
+    silently, since the code falls back to a fixed offset, putting due dates
+    back out by an hour for half the year.
+    """
+    script = (ROOT / "scripts" / "build-sidecar.ps1").read_text()
+    assert '"--collect-all", "tzdata"' in script
+    assert '"--collect-all", "tzlocal"' in script
+
+
+def test_timezone_dependencies_are_declared():
+    pyproject = (SIDECAR / "pyproject.toml").read_text()
+    assert "tzlocal" in pyproject
+    assert "tzdata" in pyproject
+
+
 def test_build_script_does_not_discard_the_probe_stderr():
     """The traceback on stderr is the whole diagnosis when the exe won't start."""
     script = (ROOT / "scripts" / "build-sidecar.ps1").read_text()

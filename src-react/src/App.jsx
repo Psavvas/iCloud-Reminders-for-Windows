@@ -50,7 +50,8 @@ export default function App() {
   const [sheet, setSheet] = useState(null); // new | settings | print
   const [onboarding, setOnboarding] = useState(false);
   const [banner, setBanner] = useState(null);
-  const [syncLine, setSyncLine] = useState("");
+  // Null when idle; otherwise { determinate, percent, stage, ... } for the bar.
+  const [sync, setSync] = useState(null);
 
   const toast = useCallback((message, kind = "info", timeout = 5000) => {
     setBanner({ message, kind, timeout, at: Date.now() });
@@ -140,11 +141,21 @@ export default function App() {
       if (st.authenticated || st.has_cache) {
         setPhase("app");
         await refreshAll();
-        if (!st.authenticated) {
-          toast("Your iCloud session expired — sign in again to sync.", "warn", 0);
-        } else if (!cfg.onboarded) {
+        if (st.authenticated && !cfg.onboarded) {
           setOnboarding(true);
+        } else if (!st.authenticated && !st.restoring) {
+          toast("Your iCloud session expired — sign in again to sync.", "warn", 0);
         }
+        return;
+      }
+      if (st.restoring) {
+        // Signed in on a previous run and the sidecar is rebuilding the session
+        // right now. Showing the password form here is what made the app feel
+        // like it signed you out constantly. `restoring` and not `can_restore`:
+        // a saved password outlives a restore that failed, and waiting on an
+        // auth_changed that already fired would hang here forever.
+        setPhase("gate");
+        setGateStep("restoring");
         return;
       }
       setPhase("gate");
@@ -175,24 +186,52 @@ export default function App() {
   // ----------------------------------------------------------------- events
   useEffect(() => {
     const offs = [
+      listen("sidecar://sync_started", (e) => {
+        const d = e.payload || {};
+        setSync({
+          determinate: d.determinate !== false,
+          percent: 0,
+          startedAt: Date.now(),
+          stage: null,
+        });
+      }),
       listen("sidecar://sync_finished", async () => {
+        setSync(null);
         await refreshAll();
-        setSyncLine("");
       }),
       listen("sidecar://sync_progress", (e) => {
         const d = e.payload || {};
-        if (d.stage === "reminders") {
-          setSyncLine(`Syncing ${d.index}/${d.of} — ${d.total} reminders`);
-        }
+        setSync((s) =>
+          s
+            ? { ...s, ...d, percent: d.percent ?? s.percent }
+            : // A progress event with no start (the sidecar restarted mid-sync)
+              // still deserves a bar.
+              { determinate: d.percent != null, startedAt: Date.now(), ...d }
+        );
       }),
       listen("sidecar://sync_error", (e) => {
         const err = e.payload || {};
+        setSync(null);
         if (err.code === "AUTH_REQUIRED") {
           toast("Your iCloud session expired — sign in again to sync.", "warn", 0);
         } else if (err.code === "TERMS_REQUIRED") {
           toast("Apple needs you to accept updated iCloud terms.", "warn", 0);
         } else {
           toast(err.message || "Sync failed.", "warn");
+        }
+      }),
+      listen("sidecar://auth_changed", (e) => {
+        const st = e.payload || {};
+        if (st.authenticated) {
+          boot();
+          return;
+        }
+        // The restore finished and failed. Only now is the password form the
+        // right thing to show — not on the way there. Someone already looking
+        // at cached data gets told rather than silently left with stale rows.
+        setGateStep((s) => (s === "restoring" ? "login" : s));
+        if (phase === "app") {
+          toast("Your iCloud session expired — sign in again to sync.", "warn", 0);
         }
       }),
       listen("sidecar://conflict", refreshStatus),
@@ -315,7 +354,7 @@ export default function App() {
           tag={tag}
           onSelect={select}
           status={status}
-          syncLine={syncLine}
+          sync={sync}
           onSync={async () => {
             await call("sync", {});
             toast("Syncing…", "info", 2000);
@@ -428,7 +467,7 @@ export default function App() {
         <Onboarding
           settings={settings}
           setSettings={setSettings}
-          syncLine={syncLine}
+          sync={sync}
           counts={counts}
           lists={lists}
           onDone={() => setOnboarding(false)}

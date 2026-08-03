@@ -95,8 +95,16 @@ up a sidecar edit — the shell respawns it, no PyInstaller run involved.
 First launch asks for your Apple ID and password, then a 2FA code, then walks
 through a short setup: what stays running in the tray, notifications and
 start-with-Windows, and the two things Apple will not allow — so they are known
-up front rather than discovered later. The password goes to Windows Credential
-Manager via `keyring`; the session persists, so subsequent launches skip both.
+up front rather than discovered later.
+
+**Staying signed in.** iCloud expires session tokens on its own schedule, every
+few weeks. The password goes to Windows Credential Manager via `keyring`, which
+is what lets the sidecar rebuild a session from the stored credential and the
+trust token without a prompt: it does so on every launch, and again the moment a
+background sync is refused. You see the sign-in screen when the restore actually
+fails, not on a timer. Turn it off under Settings → Account if you would rather
+type the password each time; signing out clears the stored credential either
+way.
 
 Closing the window hides it to the tray — the scheduler has to keep running for
 due-date toasts to be worth anything. Quit from the tray menu.
@@ -109,7 +117,7 @@ due-date toasts to be worth anything. Quit from the tray menu.
 | Title, notes, due date, priority | Read/write |
 | Tags | **Read and filter only** |
 | Creating, renaming, deleting lists | **Not supported** |
-| Background sync | Delta cursor, every 5–15 minutes |
+| Background sync | Delta cursor, every 5–15 minutes, with progress and an ETA |
 | Due-date notifications | 30s tick, Windows toast |
 | Smart lists | Today, Upcoming, All, Completed, Deleted |
 | Sorting | Per list: due date, priority, title, recently added |
@@ -130,10 +138,28 @@ See `spike/README.md` for the full findings.
 
 ## Design notes
 
-**Times.** Everything is stored UTC and converted at display. The cache rejects
-naive datetimes outright. A date picker hands over local wall-clock time, which
-the sidecar resolves against the machine's zone — Apple's API would otherwise
-silently read it as UTC.
+**Times.** A reminder due "3 August at 8 PM" is a wall-clock fact, not a point
+on the timeline, and Apple stores it as one: the CloudKit timestamp holds those
+wall-clock fields encoded as though the zone were UTC, with a separate `TimeZone`
+field naming the zone they belong to (null means the reminder floats). Reading
+that timestamp as a real instant is wrong by the local UTC offset, and wrong in
+the direction that makes things look overdue early west of Greenwich — an
+all-day reminder, stored as midnight, renders as 8:00 PM the previous evening at
+UTC-4 and lands under Overdue a full day ahead of time.
+
+`sidecar/reminders_sidecar/timeutil.py` is the only place the two
+representations meet; everything downstream works in true UTC instants, and the
+cache rejects naive datetimes outright. Writes go through the same conversion in
+reverse, so a due date set here shows the same time on the phone. The zone comes
+from `tzlocal` rather than the current UTC offset, because a fixed offset taken
+today converts a January date an hour wrong.
+
+`scripts\check-due-dates.py` prints both readings side by side against a live
+account, if that ever needs re-confirming.
+
+**All-day reminders.** They have a date and no time, so they show as *All Day*
+rather than midnight, go late only once their day is over, and toast at 9am —
+a notification fired at 00:00 is one nobody reads.
 
 **Sleeping through due times.** Reminders overdue by more than an hour are
 treated as missed while the machine was away and collapse into a single summary
@@ -163,8 +189,17 @@ account and nobody scrolls it. Fifty most-recently-completed, newest first.
 
 **Date headings.** Views spanning more than one day (Upcoming, All, Today)
 group under Overdue / Today / Tomorrow / a real date, and rows under a heading
-show only their time, since the date is already above them. Grouping is by local
-calendar day, matching how the sidecar buckets Today.
+show only their time, since the date is already above them. Overdue and No Date
+are exceptions — they span many days, so a bare time under them would read as
+today. Grouping is by local calendar day, matching how the sidecar buckets Today.
+
+**Sync progress.** The bar is weighted by each list's reminder count rather than
+counting lists, because the work is wildly uneven — one list on the account this
+was built against holds 1,219 of 2,900 records, and a bar advancing a
+fourteenth per list would sit near the end for most of the sync. The estimate is
+withheld below 8% and in the first few seconds, where extrapolating swings by
+minutes between ticks. A delta sync has no knowable size, so it animates rather
+than claiming a figure.
 
 **Lists on every sync.** `iter_changes()` only ever reports reminders, so a
 renamed or deleted list would never appear through the delta cursor. Lists are

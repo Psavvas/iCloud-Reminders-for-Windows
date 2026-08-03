@@ -154,3 +154,25 @@ def test_conflicts_roundtrip(cache):
     assert rows[0]["remote"]["title"] == "theirs"
     cache.resolve_conflict(rows[0]["id"])
     assert cache.conflicts() == []
+
+
+# ------------------------------------------------------------- settings ----
+def test_per_list_sort_actually_persists(cache):
+    """
+    set_settings drops keys it has never seen, so a setting missing from the
+    defaults silently fails to save. sort_by was in that state: choosing a sort
+    order appeared to work and then reverted on the next read.
+    """
+    saved = cache.set_settings({"sort_by": {"list:List/A": "priority"}})
+    assert saved["sort_by"] == {"list:List/A": "priority"}
+    assert cache.get_settings()["sort_by"] == {"list:List/A": "priority"}
+
+
+def test_remember_password_defaults_to_on(cache):
+    assert cache.get_settings()["remember_password"] is True
+    assert cache.set_settings({"remember_password": False})["remember_password"] is False
+
+
+def test_unknown_settings_are_still_rejected(cache):
+    # The filtering itself is deliberate -- it stops the UI inventing keys.
+    assert "nonsense" not in cache.set_settings({"nonsense": 1})

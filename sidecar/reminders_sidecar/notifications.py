@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .db import Cache, from_iso
+from .timeutil import notify_at
 
 
 @dataclass
@@ -57,11 +58,15 @@ class NotificationPlan:
         }
 
 
-def _fmt_due(iso: Optional[str]) -> str:
+def _fmt_due(iso: Optional[str], all_day: bool = False) -> str:
     dt = from_iso(iso)
     if dt is None:
         return ""
-    return dt.astimezone().strftime("%a %d %b, %H:%M")
+    local = dt.astimezone()
+    if all_day:
+        # An all-day reminder has no time; printing midnight would invent one.
+        return local.strftime("%a %d %b")
+    return local.strftime("%a %d %b, %H:%M")
 
 
 def plan_notifications(
@@ -81,11 +86,19 @@ def plan_notifications(
     missed: list[dict] = []
     fresh: list[dict] = []
     for r in due:
-        dt = from_iso(r.get("due_date"))
-        if dt is not None and dt < stale_cutoff:
+        # An all-day reminder's instant is local midnight, so its alert time is
+        # not its due time. The query returns it from midnight onward; whether
+        # it has actually come due is decided here.
+        when = notify_at(from_iso(r.get("due_date")), bool(r.get("all_day")))
+        if when is None or when > now:
+            continue
+        if when < stale_cutoff:
             missed.append(r)
         else:
             fresh.append(r)
+
+    if not missed and not fresh:
+        return plan
 
     if missed:
         titles = ", ".join(r["title"] for r in missed[:3] if r.get("title"))
@@ -108,7 +121,8 @@ def plan_notifications(
                 plan.toasts.append(
                     Toast(
                         title=r.get("title") or "Reminder",
-                        body=_fmt_due(r.get("due_date")) or "Due now",
+                        body=_fmt_due(r.get("due_date"), bool(r.get("all_day")))
+                        or "Due now",
                         reminder_id=r["id"],
                     )
                 )

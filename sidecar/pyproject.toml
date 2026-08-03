@@ -6,6 +6,11 @@ requires-python = ">=3.11"
 dependencies = [
     "pyicloud>=2.6.5",
     "keyring>=25.0",
+    # Due dates are wall-clock times that have to be anchored in a zone that
+    # knows its own DST rules -- a fixed offset taken "now" is an hour wrong
+    # half the year. tzlocal finds that zone; tzdata is what backs zoneinfo on
+    # Windows, which ships no tz database of its own.
+    "tzlocal>=5.2",
     "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 

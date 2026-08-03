@@ -52,6 +52,19 @@ export default function Gate({
           </div>
         )}
 
+        {/* Signed in on a previous run. The sidecar is re-establishing the
+            session from the saved credential and trust token, which needs
+            nothing from the user -- so don't ask them for anything. */}
+        {step === "restoring" && (
+          <div className="gate-step">
+            <div className="spinner" />
+            <p className="hint centered">Signing you back in…</p>
+            <button className="linkish" onClick={() => setStep("login")}>
+              Use a different account
+            </button>
+          </div>
+        )}
+
         {step === "login" && (
           <form
             className="gate-step"
