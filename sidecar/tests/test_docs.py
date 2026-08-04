@@ -1,0 +1,105 @@
+"""
+The README, checked rather than trusted.
+
+Documentation rots quietly: a screenshot gets renamed, a section heading changes
+and an anchor stops resolving, a count goes stale. None of that fails a build,
+and none of it is visible unless someone re-reads the whole file. These are the
+claims cheap enough to verify automatically.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+README = ROOT / "README.md"
+
+
+@pytest.fixture(scope="module")
+def readme() -> str:
+    return README.read_text(encoding="utf-8")
+
+
+def _heading_slugs(md: str) -> set[str]:
+    """GitHub's anchor rule: lowercase, drop punctuation, spaces to hyphens."""
+    out = set()
+    for line in re.findall(r"^#+\s+(.*)$", md, re.M):
+        text = re.sub(r"<[^>]+>", "", line)          # strip inline html
+        text = re.sub(r"[^\w\- ]", "", text.lower())  # strip punctuation
+        out.add(text.strip().replace(" ", "-"))
+    return out
+
+
+def _targets(md: str) -> list[tuple[str, str]]:
+    """(kind, target) for every markdown link/image and every <img src>."""
+    found = [("link", t) for _, t in re.findall(r"(?<!!)\[([^\]]*)\]\(([^)\s]+)\)", md)]
+    found += [("image", t) for t in re.findall(r"!\[[^\]]*\]\(([^)\s]+)\)", md)]
+    found += [("img tag", t) for t in re.findall(r'<img[^>]+src="([^"]+)"', md)]
+    return found
+
+
+def test_every_local_link_and_image_resolves(readme):
+    slugs = _heading_slugs(readme)
+    broken = []
+    for kind, target in _targets(readme):
+        if target.startswith(("http://", "https://", "mailto:")):
+            continue
+        if target.startswith("#"):
+            if target[1:] not in slugs:
+                broken.append(f"{kind} anchor {target}")
+        elif not (ROOT / target).is_file():
+            broken.append(f"{kind} {target}")
+    assert not broken, "README points at things that do not exist: " + ", ".join(broken)
+
+
+def test_the_readme_shows_a_logo(readme):
+    """The header image is the app's own icon, so it can never drift from it."""
+    srcs = [t for _, t in _targets(readme)]
+    assert any("icons/icon.png" in s or "icons/128x128" in s for s in srcs), (
+        "the header no longer shows the app icon"
+    )
+
+
+def test_collapsible_sections_are_balanced(readme):
+    """An unclosed <details> swallows the rest of the page on GitHub."""
+    assert readme.count("<details") == readme.count("</details>")
+    assert readme.count("<summary") == readme.count("</summary>")
+    # Raw markdown inside <details> only renders after a blank line.
+    for block in re.findall(r"</summary>\n(.)", readme):
+        assert block == "\n", "put a blank line after </summary> or the markdown is literal"
+
+
+def test_html_tables_are_balanced(readme):
+    assert readme.count("<table") == readme.count("</table>")
+    assert readme.count("<tr") == readme.count("</tr>")
+    assert readme.count("<td") == readme.count("</td>")
+
+
+def test_mermaid_blocks_are_not_empty(readme):
+    """Syntax is validated by rendering; this only catches an empty fence."""
+    blocks = re.findall(r"```mermaid\n(.*?)```", readme, re.S)
+    assert blocks, "the architecture diagram is gone"
+    for b in blocks:
+        assert b.strip(), "empty mermaid block renders as an error box on GitHub"
+
+
+def test_the_stated_test_count_is_current(request, readme):
+    """
+    The README claims a number in two places -- a badge and a sentence. Both go
+    stale the moment a test is added, and nothing else would ever notice.
+    """
+    invoked = [a for a in request.config.invocation_params.args if not a.startswith("-")]
+    if invoked:
+        pytest.skip("partial run; the total only means something for the whole suite")
+
+    total = len(request.session.items)
+    claims = {int(n) for n in re.findall(r"(\d+)(?:%20| )(?:tests?|passing)", readme)}
+    claims |= {int(n) for n in re.findall(r"\b(\d+) tests\b", readme)}
+    assert claims, "the README no longer states a test count"
+    assert claims == {total}, (
+        f"README says {sorted(claims)}, suite collects {total}. "
+        f"Update the badge and the Tests section."
+    )

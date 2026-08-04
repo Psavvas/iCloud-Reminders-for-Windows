@@ -1,9 +1,18 @@
+<div align="center">
+
+<img src="src-tauri/icons/icon.png" width="120" alt="App icon: a white card holding four coloured bullets beside grey list bars">
+
 # iCloud Reminders for Windows
 
-A desktop client for Apple Reminders, with the due-date notifications Windows
-otherwise never gives you.
+**A desktop client for Apple Reminders, with the due-date notifications Windows otherwise never gives you.**
 
-![The main window](docs/screenshots/01-main-light.png)
+<img src="docs/badges.png" height="30" alt="Windows 10 / 11 · Tauri v2 shell · Python 3.11+ sidecar · React 19 UI · unofficial API">
+
+<br>
+
+<img src="docs/screenshots/01-main-light.png" width="880" alt="The main window: list sidebar, reminders, and a detail pane">
+
+</div>
 
 ## Why this exists
 
@@ -57,12 +66,27 @@ attachments, location triggers, sharing, and natural-language date entry.
 
 ## Screenshots
 
-| | |
-|---|---|
-| ![Upcoming](docs/screenshots/15-upcoming-dates.png) | ![Dark](docs/screenshots/02-main-dark.png) |
-| Upcoming, grouped by day the way Apple does it | Dark theme, following Windows or forced |
-| ![Sync](docs/screenshots/17-sync-progress.png) | ![Conflict](docs/screenshots/04-conflict.png) |
-| Sync progress, weighted by list size | A conflict, kept rather than silently resolved |
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/15-upcoming-dates.png" alt="Upcoming, grouped under day headings"></td>
+<td width="50%"><img src="docs/screenshots/02-main-dark.png" alt="The main window in dark theme"></td>
+</tr>
+<tr>
+<td><b>Upcoming</b>, grouped by day the way Apple does it</td>
+<td><b>Dark theme</b>, following Windows or forced in Settings</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/07-new-reminder.png" alt="The new reminder sheet"></td>
+<td><img src="docs/screenshots/13-print-options.png" alt="Print options: grouping, notes, completed items"></td>
+</tr>
+<tr>
+<td><b>New reminder</b> as a sheet, not a permanently open field</td>
+<td><b>Printing</b> any view, grouped, with tick boxes</td>
+</tr>
+</table>
+
+Sync progress and conflict handling are shown further down, next to the notes
+that explain them.
 
 ## Using it
 
@@ -130,9 +154,14 @@ outbox for the sidecar to push.
 
 ## Design notes
 
-The parts that were not obvious.
+The parts that were not obvious. Collapsed because they are the long tail, not
+because they are unimportant — the first one is the bug that took longest to
+find.
 
-### Time is the hard part
+<details open>
+<summary><b>Time is the hard part</b> — Apple's due dates are not instants</summary>
+
+<br>
 
 A reminder due "3 August at 8 PM" is a wall-clock fact, not a point on the
 world's timeline, and Apple stores it as one: the CloudKit timestamp holds those
@@ -160,7 +189,12 @@ account, if that ever needs re-confirming.
 rather than midnight, go late only once their day is over, and toast at 9am — a
 notification fired at 00:00 is one nobody reads.
 
-### Sleeping through due times
+</details>
+
+<details>
+<summary><b>Sleeping through due times</b> — why you don't wake to fourteen toasts</summary>
+
+<br>
 
 Reminders overdue by more than an hour are treated as missed while the machine
 was away, and collapse into one summary toast. Freshly-due ones toast
@@ -168,7 +202,12 @@ individually, up to three; past that they collapse too. Waking the laptop to
 fourteen separate notifications is worse than useless. The stale threshold is
 configurable in Settings.
 
-### Both devices write
+</details>
+
+<details>
+<summary><b>Both devices write</b> — conflicts are recorded, not resolved</summary>
+
+<br>
 
 Local edits go to an outbox carrying the CloudKit change tag they were made
 against. If the record moved since, the push is recorded as a conflict rather
@@ -178,7 +217,14 @@ your version is preserved and offered back.
 This matters because the phone was observed *replacing* a reminder's tag list
 wholesale rather than merging it. Last-write-wins would silently eat data.
 
-### Sync
+![A conflict, with both versions offered](docs/screenshots/04-conflict.png)
+
+</details>
+
+<details>
+<summary><b>Sync</b> — the delta cursor's blind spot, and a progress bar that means something</summary>
+
+<br>
 
 Delta syncs use CloudKit's zone change cursor and are usually instant. One
 wrinkle: `iter_changes()` only ever reports reminders, so a renamed or deleted
@@ -193,7 +239,14 @@ withheld below 8% and in the first few seconds, where extrapolating swings by
 minutes between ticks. A delta sync has no knowable size, so it animates rather
 than claiming a figure.
 
-### The list
+![A sync in progress, with a percentage and an estimate](docs/screenshots/17-sync-progress.png)
+
+</details>
+
+<details>
+<summary><b>The list</b> — ordering, capping and date headings</summary>
+
+<br>
 
 **Ordering happens in SQLite.** Sort mode and the Completed cap are applied by
 the query, not by JavaScript afterwards — a 1,219-row list should never reach
@@ -212,14 +265,24 @@ local calendar day, matching how the sidecar buckets Today.
 **Priority is not ordinal.** Apple stores high as 1, medium as 5, low as 9 and
 none as 0. Sorting numerically would put unprioritised items first.
 
-### Printing
+</details>
+
+<details>
+<summary><b>Printing</b></summary>
+
+<br>
 
 Any view prints, including a search or a smart list. Rows group by due date
 (Overdue / Today / Tomorrow / This week / This month / Later), by priority, or
 by list, and each gets an empty square to tick by hand. Notes and completed
 items are optional. `break-inside: avoid` keeps a reminder off a page boundary.
 
-### Look and feel
+</details>
+
+<details>
+<summary><b>Look and feel</b> — icons, motion, scrollbars, first paint</summary>
+
+<br>
 
 - **The app icon** is drawn by `scripts/make_icons.py` with no image library, as
   signed distance fields — exact distance to an edge antialiases cleanly at any
@@ -244,6 +307,8 @@ items are optional. `break-inside: avoid` keeps a reminder off a page boundary.
   built copy — a blocked inline script fails silently, so the flash would just
   quietly return.
 - Everything collapses under `prefers-reduced-motion`.
+
+</details>
 
 ## Building
 
@@ -324,15 +389,19 @@ pip install ./sidecar pytest
 cd sidecar; python -m pytest
 ```
 
-137 tests, covering the things that are hard to check by looking: wall-clock and
-timezone conversion, cache filtering and ordering, delta sync and conflict
-recording, session restore, the stdio protocol contract, sleep/wake notification
-batching, the frozen-build entry point, and the icon set — that every Windows
-shell size exists, that the small art keeps its bullets, and that the CSP still
-allows the inline script.
+143 tests, aimed at the things that are hard to check by looking:
 
-They run on Linux and macOS as well as Windows; nothing in the suite needs an
-Apple account.
+- wall-clock and timezone conversion, including the all-day case
+- cache filtering, ordering and the Completed cap
+- delta sync, conflict recording, and session restore after expiry
+- the stdio protocol contract, and the frozen-build entry point
+- sleep/wake notification batching
+- the icon set — every Windows shell size present, the small art still legible,
+  the CSP still allowing the inline script
+- this README — that its links resolve and its numbers are current
+
+They run on Linux and macOS as well as Windows, and nothing in the suite needs
+an Apple account.
 
 ## Layout
 
