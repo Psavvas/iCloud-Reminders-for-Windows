@@ -45,5 +45,12 @@
       }
     }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6...",
+      "endpoints": [
+        "https://github.com/psavvas/reminders-sync/releases/latest/download/latest.json"
+      ]
+    }
+  }
 }
