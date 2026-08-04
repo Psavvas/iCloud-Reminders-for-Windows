@@ -160,6 +160,11 @@ def test_the_build_workflow_exists_and_covers_windows():
     assert "reminders-sidecar.exe" in text, (
         "CI must verify the sidecar reached the bundle -- it has shipped without it"
     )
+    assert "7z" in text and "Get-FileHash" in text, (
+        "the sidecar check must unpack the installers and match by content. It is "
+        "a bundled resource, so it lives inside the .msi and .exe; globbing the "
+        "bundle directory only ever finds the installers themselves."
+    )
 
 
 def test_no_npm_script_drives_the_frontend_with_a_prefix_flag():

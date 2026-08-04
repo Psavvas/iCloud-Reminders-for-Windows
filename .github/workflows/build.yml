@@ -105,16 +105,54 @@ jobs:
       - name: Build the installer
         run: npm run build
 
-      # Proof the sidecar actually travelled with the bundle. The installer has
+      # Proof the sidecar actually travelled inside the installers. It has
       # shipped without it before, and the app is dead on arrival when it does.
-      - name: Check the sidecar is in the bundle
+      #
+      # The sidecar is a bundled resource, so it is *inside* the .msi and .exe;
+      # the bundle directory only ever holds the installers themselves. So this
+      # unpacks them and looks. Matching is by content hash rather than by name,
+      # because an MSI stores its payload in a cab under names of its own
+      # choosing -- a hash match is also the stronger claim: not merely that
+      # something called reminders-sidecar.exe is in there, but that the binary
+      # the freeze step smoke-tested is the one that shipped.
+      - name: Check the sidecar travelled inside the installers
         run: |
-          $found = Get-ChildItem -Recurse -Path src-tauri\target\release\bundle -Filter reminders-sidecar.exe -ErrorAction SilentlyContinue
-          if (-not $found) {
-            Get-ChildItem -Recurse src-tauri\target\release\bundle | Select-Object -ExpandProperty FullName
-            throw "reminders-sidecar.exe is not inside the bundle output."
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $expected = Get-Item dist-sidecar\reminders-sidecar.exe
+          $want = (Get-FileHash $expected.FullName -Algorithm SHA256).Hash
+          Write-Host "Looking for $($expected.Length) bytes, SHA256 $want"
+
+          $installers = @(Get-ChildItem -Recurse -Path src-tauri\target\release\bundle -Include *.msi, *-setup.exe)
+          if ($installers.Count -lt 2) {
+            throw "expected an msi and an nsis installer, found $($installers.Count)"
           }
-          Write-Host "Sidecar bundled: $($found[0].FullName)"
+
+          foreach ($installer in $installers) {
+            $out = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetRandomFileName())
+            & "7z" x -y "-o$out" $installer.FullName | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "7z could not unpack $($installer.Name)" }
+
+            # An MSI keeps its payload in a cab; open that too before looking.
+            foreach ($cab in Get-ChildItem -Recurse -File -Path $out -Filter *.cab -ErrorAction SilentlyContinue) {
+              & "7z" x -y "-o$out" $cab.FullName | Out-Null
+            }
+
+            $unpacked = Get-ChildItem -Recurse -File -Path $out -ErrorAction SilentlyContinue
+            $hit = $unpacked |
+                   Where-Object { $_.Length -eq $expected.Length } |
+                   Where-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash -eq $want } |
+                   Select-Object -First 1
+
+            if (-not $hit) {
+              Write-Host "--- $($unpacked.Count) files unpacked from $($installer.Name) ---"
+              $unpacked | Select-Object -First 100 -Property Name, Length |
+                Format-Table | Out-String | Write-Host
+              throw "the sidecar is not inside $($installer.Name)."
+            }
+            Write-Host "$($installer.Name): sidecar present as $($hit.Name)"
+          }
 
       - name: Upload the installers
         uses: actions/upload-artifact@v4
