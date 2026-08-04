@@ -193,6 +193,38 @@ show only their time, since the date is already above them. Overdue and No Date
 are exceptions — they span many days, so a bare time under them would read as
 today. Grouping is by local calendar day, matching how the sidecar buckets Today.
 
+**The icon.** Drawn by `scripts/make_icons.py` with no image library, as signed
+distance fields — exact distance to an edge antialiases cleanly at any size, and
+the drop shadow falls out of the same number. That shadow is what stops a white
+card disappearing on a white taskbar. Ten sizes are emitted, including the
+20/24/40 that display scaling asks for and that Windows otherwise fakes by
+resampling. Below 28px the art is redrawn rather than shrunk: three rows instead
+of four, and feature sizes floored in absolute pixels, because proportional
+scaling puts a bullet under a pixel across at 16px. `AppMark.jsx` is the same
+geometry in SVG, so the mark in the app and the one in the taskbar are one
+drawing.
+
+**Motion.** One easing curve throughout, with one deliberate exception: a row
+being ticked off exits on an ease-*in*: the app's usual curve is front-loaded,
+which is right for something arriving and wrong for something leaving — the row
+would be most of the way gone a third of the way in and read as a blink. The
+checkbox fills immediately while the write and reload happen behind it. Every
+animation collapses under `prefers-reduced-motion`, and the row exit is dropped
+outright there rather than merely shortened, which would leave an invisible row
+holding its space.
+
+**Scrollbars.** Styled, because WebView2 otherwise draws the stock Windows
+scrollbar — a wide trough with arrow buttons — inside an app that is Apple
+everywhere else.
+
+**First paint.** `index.html` carries the theme background inline, ahead of the
+bundle, plus a copy of the theme override in localStorage. Without both, every
+launch on a dark theme starts with a white flash while the stylesheet loads. The
+inline script is allow-listed in the CSP by hash rather than by
+`'unsafe-inline'`, and a test recomputes that hash from both the source and the
+built copy — a blocked inline script fails silently, so the flash would just
+quietly return.
+
 **Sync progress.** The bar is weighted by each list's reminder count rather than
 counting lists, because the work is wildly uneven — one list on the account this
 was built against holds 1,219 of 2,900 records, and a bar advancing a

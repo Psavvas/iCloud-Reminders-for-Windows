@@ -53,6 +53,24 @@
     { id: "R/15", list_id: "List/IN", title: "Mum's birthday", description: "", due_date: at(2, 0, 0), all_day: 1, priority: 0, completed: 0, dirty: 0, tags: ["personal"] },
   ];
 
+  // Chores is the long list on the real account. Filling it out here is what
+  // makes the list actually scroll, which is the only way to see the scrollbar.
+  const CHORES = [
+    "Wipe down the kitchen counters", "Descale the kettle", "Sort the recycling",
+    "Change the bed linen", "Hoover the stairs", "Water the plants",
+    "Clean the bathroom mirror", "Take the bins out", "Refill the salt grinder",
+    "Wash the car", "Sweep the porch", "Defrost the freezer",
+    "Replace the smoke alarm battery", "Clear out the fridge",
+    "Iron the school shirts", "Mop the hallway", "Dust the bookshelves",
+  ];
+  CHORES.forEach((title, i) => {
+    REMINDERS.push({
+      id: `R/C${i}`, list_id: "List/CHO", title, description: "",
+      due_date: i % 3 === 0 ? at(1 + (i % 5), 9 + (i % 8), 0) : null,
+      priority: [0, 0, 5, 0, 9][i % 5], completed: 0, dirty: 0, tags: [],
+    });
+  });
+
   const TAGS = [
     { name: "errands", n: 12 }, { name: "health", n: 3 }, { name: "personal", n: 9 },
     { name: "school", n: 41 }, { name: "urgent", n: 4 },
@@ -149,6 +167,21 @@
     }] : []),
     sync: () => ({ queued: true }),
     login: () => ({ authenticated: true }),
+    update_reminder: (p) => {
+      const r = REMINDERS.find((x) => x.id === p.id);
+      if (r) Object.assign(r, p);
+      return r;
+    },
+    delete_reminder: (p) => {
+      const r = REMINDERS.find((x) => x.id === p.id);
+      if (r) r.deleted = 1;
+      return { deleted: p.id };
+    },
+    create_reminder: (p) => {
+      const r = { id: `R/new${REMINDERS.length}`, tags: [], dirty: 1, ...p };
+      REMINDERS.unshift(r);
+      return r;
+    },
   };
 
   // A real event bus, so a capture can drive sidecar events -- the sync bar

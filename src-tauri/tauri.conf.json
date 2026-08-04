@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'sha256-lJIdEZgcCDGRvtJxsSdSxSxM1JAC+pbPVqBqXoTd+Qg='"
     }
   },
   "bundle": {
@@ -32,7 +32,9 @@
     ],
     "icon": [
       "icons/icon.ico",
-      "icons/128x128.png"
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
     ],
     "resources": {
       "../dist-sidecar/reminders-sidecar.exe": "reminders-sidecar.exe"

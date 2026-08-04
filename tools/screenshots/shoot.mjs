@@ -63,17 +63,26 @@ const ORIGIN = `http://127.0.0.1:${server.address().port}`;
 
 const browser = await chromium.launch({
   executablePath: "/opt/pw-browsers/chromium-1194/chrome-linux/chrome",
+  // Playwright hides scrollbars by default for deterministic shots. The app
+  // styles them, so hiding them is exactly what must not happen here.
+  ignoreDefaultArgs: ["--hide-scrollbars"],
 });
 
 async function shoot(
   name,
-  { dark = false, prep = null, width = 1180, height = 760, flags = {} } = {}
+  {
+    dark = false, prep = null, width = 1180, height = 760, flags = {},
+    // Captures are deterministic with motion off. A shot whose whole subject is
+    // an animation has to opt back in, and skip the settle that would outrun it.
+    motion = false,
+    settle = 400,
+  } = {}
 ) {
   const ctx = await browser.newContext({
     viewport: { width, height },
     deviceScaleFactor: 2,
     colorScheme: dark ? "dark" : "light",
-    reducedMotion: "reduce", // settle animations so captures are deterministic
+    reducedMotion: motion ? "no-preference" : "reduce",
   });
   if (Object.keys(flags).length) {
     await ctx.addInitScript((f) => Object.assign(window, f), flags);
@@ -84,7 +93,7 @@ async function shoot(
   await page.waitForSelector(".app, .gate", { timeout: 15000 });
   await page.waitForTimeout(500);
   if (prep) await prep(page);
-  await page.waitForTimeout(400);
+  if (settle) await page.waitForTimeout(settle);
   await page.screenshot({ path: path.join(OUT, name + ".png") });
   console.log("  wrote " + name + ".png");
   await ctx.close();
@@ -150,6 +159,22 @@ await shoot("07-new-reminder", {
 });
 
 await shoot("08-today", { prep: (p) => clickRow(p, "Today") });
+
+// A long list, so the scrollbar is on screen, caught mid-fade as a reminder is
+// ticked off. Both are timing-dependent, which is exactly why they are pinned
+// in a screenshot rather than checked by eye.
+await shoot("19-list-scroll-and-leave", {
+  motion: true,
+  settle: 0, // the subject is a 220ms animation; settling would outlast it
+  prep: async (page) => {
+    await clickRow(page, "Chores");
+    await page.waitForTimeout(500);
+    await page.evaluate(() => {
+      document.querySelector(".reminder input[type=checkbox]").click();
+    });
+    await page.waitForTimeout(100); // partway through the 220ms exit
+  },
+});
 
 // Sync progress. The bar only exists while a sync is running, so the events the
 // sidecar would send are dispatched by hand.

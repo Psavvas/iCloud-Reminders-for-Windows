@@ -12,10 +12,18 @@ import {
 /** Views that span more than one day read better broken up by date. */
 const DATE_GROUPED = new Set(["upcoming", "all", "today"]);
 
-function Row({ r, lists, showList, selected, onSelect, onToggle, onRestore, inTrash, dateOnly }) {
+function Row({
+  r, lists, showList, selected, onSelect, onToggle, onRestore, inTrash,
+  dateOnly, leaving,
+}) {
   return (
     <li
-      className={`reminder${r.completed ? " done" : ""}${selected ? " selected" : ""}`}
+      className={
+        "reminder" +
+        (r.completed ? " done" : "") +
+        (selected ? " selected" : "") +
+        (leaving ? " leaving" : "")
+      }
       onClick={() => onSelect(r.id)}
     >
       {inTrash ? (
@@ -32,7 +40,9 @@ function Row({ r, lists, showList, selected, onSelect, onToggle, onRestore, inTr
       ) : (
         <input
           type="checkbox"
-          checked={!!r.completed}
+          /* Ticks the moment it is clicked. The write and the reload behind it
+             take longer than the eye allows for a checkbox. */
+          checked={!!r.completed || leaving}
           onClick={(e) => e.stopPropagation()}
           onChange={(e) => onToggle(r, e.target.checked)}
         />
@@ -81,6 +91,7 @@ const ListPane = forwardRef(function ListPane(
     search, setSearch, searchScope, onToggleSearchScope,
     showDone, setShowDone, sortBy, setSortBy,
     selectedId, onSelect, onNew, onPrint, onToggleComplete, onRestore,
+    viewKey, leaving,
   },
   ref
 ) {
@@ -259,7 +270,10 @@ const ListPane = forwardRef(function ListPane(
             : "Nothing here."}
         </p>
       ) : (
-        <div className="reminders-scroll">
+        // Re-keyed per view: the rows are all replaced on a switch anyway, and
+        // remounting here both replays the enter animation and puts the new
+        // list at the top rather than inheriting the last one's scroll.
+        <div className="reminders-scroll" key={viewKey}>
           {grouped.map((g) => (
             <section key={g.key} className="day-group">
               {showDates && g.label && (
@@ -281,6 +295,7 @@ const ListPane = forwardRef(function ListPane(
                     onToggle={onToggleComplete}
                     onRestore={onRestore}
                     inTrash={inTrash}
+                    leaving={leaving?.has(r.id)}
                     // Only hide the date when the heading above actually
                     // states one. "Overdue" and "No Date" span many days, so
                     // a bare time there reads as today and is misleading.

@@ -22,7 +22,22 @@ function applyTheme(theme) {
   const root = document.documentElement;
   if (theme === "light" || theme === "dark") root.dataset.theme = theme;
   else delete root.dataset.theme;
+  // Mirrored into localStorage so the inline script in index.html can apply it
+  // on the next launch before the first paint. Settings remains the source of
+  // truth; this is only ever a head start.
+  try {
+    if (theme === "light" || theme === "dark") localStorage.setItem("theme", theme);
+    else localStorage.removeItem("theme");
+  } catch {
+    /* storage unavailable; the round trip still sets it, just later */
+  }
 }
+
+/** How long a row spends fading out before the list reloads without it. */
+const ROW_LEAVE_MS = 220;
+
+const reducedMotion = () =>
+  window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 
 export default function App() {
   const [phase, setPhase] = useState("loading"); // loading | gate | app
@@ -296,6 +311,38 @@ export default function App() {
     [rows, selectedId]
   );
 
+  // Rows on their way out. Ticking something off in a view that hides completed
+  // items removes it, and doing that in the same frame as the click reads as a
+  // glitch -- so the row fades first and the reload waits for it.
+  const [leaving, setLeaving] = useState(() => new Set());
+
+  const toggleComplete = useCallback(
+    async (r, done) => {
+      const willLeave =
+        done && !showDone && scope !== "completed" && !reducedMotion();
+      if (willLeave) {
+        setLeaving((s) => new Set(s).add(r.id));
+        await new Promise((res) => setTimeout(res, ROW_LEAVE_MS));
+      }
+      try {
+        await mutate(() => call("update_reminder", { id: r.id, completed: done }));
+      } finally {
+        // Always clear it: a failed write leaves the row in place, and a row
+        // stuck at opacity 0 would look like the app had lost it.
+        setLeaving((s) => {
+          if (!s.has(r.id)) return s;
+          const next = new Set(s);
+          next.delete(r.id);
+          return next;
+        });
+      }
+    },
+    [mutate, showDone, scope]
+  );
+
+  /** Identity of the current view, for replaying the enter animation. */
+  const viewKey = tag ? `t:${tag}` : listId ? `l:${listId}` : `s:${scope}`;
+
   // -------------------------------------------------------------- shortcuts
   const searchRef = useRef(null);
   useEffect(() => {
@@ -386,9 +433,9 @@ export default function App() {
           onSelect={setSelectedId}
           onNew={() => setSheet("new")}
           onPrint={() => setSheet("print")}
-          onToggleComplete={(r, done) =>
-            mutate(() => call("update_reminder", { id: r.id, completed: done }))
-          }
+          viewKey={viewKey}
+          leaving={leaving}
+          onToggleComplete={toggleComplete}
           onRestore={(r) =>
             mutate(async () => {
               await call("restore_reminder", { id: r.id });

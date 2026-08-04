@@ -22,6 +22,9 @@
   --sel: rgba(120, 120, 128, 0.14);
   --shadow: 0 10px 34px rgba(0, 0, 0, 0.13), 0 2px 8px rgba(0, 0, 0, 0.06);
 
+  --scroll-thumb: rgba(60, 60, 67, 0.28);
+  --scroll-thumb-hover: rgba(60, 60, 67, 0.45);
+
   --r-sm: 7px;
   --r-md: 10px;
   --r-lg: 14px;
@@ -54,6 +57,8 @@
     --hairline: rgba(84, 84, 88, 0.6);
     --sel: rgba(120, 120, 128, 0.3);
     --shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
+    --scroll-thumb: rgba(235, 235, 245, 0.28);
+    --scroll-thumb-hover: rgba(235, 235, 245, 0.45);
   }
 }
 :root[data-theme="dark"] {
@@ -74,6 +79,8 @@
   --hairline: rgba(84, 84, 88, 0.6);
   --sel: rgba(120, 120, 128, 0.3);
   --shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
+  --scroll-thumb: rgba(235, 235, 245, 0.28);
+  --scroll-thumb-hover: rgba(235, 235, 245, 0.45);
 }
 
 * { box-sizing: border-box; }
@@ -166,6 +173,51 @@ code {
   padding: 1px 5px;
   border-radius: 4px;
   letter-spacing: 0;
+}
+
+/* ------------------------------------------------------- feel and texture */
+
+/* WebView2 draws the stock Windows scrollbar otherwise: a wide grey trough
+   with arrow buttons, sitting inside an app that is Apple everywhere else.
+   The border trick insets the thumb without shrinking the hit area. */
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-button { display: none; }
+::-webkit-scrollbar-thumb {
+  background-color: var(--scroll-thumb);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 8px;
+  transition: background-color var(--fast) linear;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--scroll-thumb-hover); }
+
+/* Dragging across a list shouldn't select its text -- that is a document
+   behaviour, and this is a list. Anything genuinely readable opts back in. */
+.app, .gate, .onboard, .sheet { user-select: none; -webkit-user-select: none; }
+input, textarea, select,
+.reminder-title, .detail-body, .detail-log, .static, code, pre {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* One focus ring, only for keyboard users. The UA default is a hard black
+   outline that ignores the border radius. */
+:focus-visible {
+  outline: 2.5px solid color-mix(in srgb, var(--blue) 55%, transparent);
+  outline-offset: 2px;
+}
+:focus:not(:focus-visible) { outline: none; }
+
+/* Press feedback. Without it every control is either hovered or nothing, and
+   a click has no moment of contact. */
+.icon-btn:active { background: var(--fill-2); }
+.icon-btn.round:active { transform: scale(0.92); }
+.smart-row:active, .list-row:active, .menu-item:active { background: var(--fill-2); }
+.chip:active { transform: scale(0.96); }
+.icon-btn, .smart-row, .list-row, .chip, .menu-item {
+  transition: background var(--fast) var(--ease), transform 90ms var(--ease);
 }
 
 /* ------------------------------------------------------------------- gate */
@@ -335,7 +387,16 @@ code {
 
 /* Takes the free space so a long list of lists scrolls here rather than
    squeezing the tag section, which has a natural height. */
-.lists { overflow-y: auto; padding: 0 10px; flex: 1 1 auto; min-height: 0; }
+.lists {
+  overflow-y: auto;
+  padding: 0 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  /* scrollIntoView keeps the selected list on screen; smooth makes that a
+     glide rather than a jump. */
+  scroll-behavior: smooth;
+  overscroll-behavior: contain;
+}
 .list-row {
   display: flex;
   align-items: center;
@@ -576,6 +637,13 @@ code {
   padding: 2px 14px 18px;
   scroll-behavior: smooth;
   overscroll-behavior: contain;
+  /* Keyed on the current view, so switching lists replays this. Rows are
+     replaced wholesale on a switch anyway -- this gives the swap a beat
+     instead of letting one list snap into another. */
+  animation: view-in 190ms var(--ease);
+}
+@keyframes view-in {
+  from { opacity: 0; transform: translateY(4px); }
 }
 .reminders { list-style: none; margin: 0; padding: 0; }
 
@@ -623,7 +691,26 @@ code {
   content-visibility: auto;
   contain-intrinsic-size: auto 46px;
 }
+.reminder:active { background: var(--fill-2); }
 .reminder:hover { background: var(--sel); }
+
+/* Ticking something off is the most common action in the app, and the row
+   vanishing between two frames reads as a glitch rather than a result. It
+   fades out first; the reload that actually removes it waits for this. */
+.reminder.leaving {
+  /* ease-in, not the app's usual --ease. That curve is front-loaded, which is
+     right for something arriving and wrong for something leaving: the row would
+     be 90% gone a third of the way in and read as a blink. This holds it long
+     enough to register as the tick landing, then takes it. */
+  animation: row-leave 220ms cubic-bezier(0.5, 0, 0.9, 0.4) forwards;
+  pointer-events: none;
+}
+.reminder.leaving::before, .reminder.leaving + .reminder::before {
+  border-color: transparent;
+}
+@keyframes row-leave {
+  to { opacity: 0; transform: translateX(14px); }
+}
 .reminder:hover::before, .reminder:hover + .reminder::before { border-color: transparent; }
 .reminder.selected { background: var(--sel); }
 .reminder.selected::before, .reminder.selected + .reminder::before { border-color: transparent; }
@@ -713,8 +800,14 @@ code {
   background: var(--sidebar);
   border-left: 1px solid var(--hairline);
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
-.detail-body { padding: 18px 16px; }
+/* Keyed on the reminder, so selecting a different one replays this rather than
+   swapping every field's text in place. */
+.detail-body {
+  padding: 18px 16px;
+  animation: view-in 180ms var(--ease);
+}
 .detail-body label {
   display: block;
   font-size: 11px;
@@ -1177,5 +1270,8 @@ button.linkish.inline { width: auto; padding: 8px 12px; }
     animation-duration: 0.001ms !important;
     transition-duration: 0.001ms !important;
   }
-  .reminders-scroll { scroll-behavior: auto; }
+  .reminders-scroll, .lists { scroll-behavior: auto; }
+  /* Zeroing the duration would leave a leaving row invisible but still in
+     place until the reload lands. Drop it outright instead. */
+  .reminder.leaving { display: none; }
 }
