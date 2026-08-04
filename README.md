@@ -204,6 +204,16 @@ scaling puts a bullet under a pixel across at 16px. `AppMark.jsx` is the same
 geometry in SVG, so the mark in the app and the one in the taskbar are one
 drawing.
 
+**Sidebar glyphs.** Drawn as SVG in `components/icons.jsx`, not typed as Unicode
+characters. The originals were U+25C9, U+25A4, U+2261 and friends: which shape
+you actually got depended on which installed font first claimed the codepoint,
+they carried their own metrics so they never centred in their circle, and none
+of them resembled anything Apple ships. Today shows the real date, which is the
+only thing distinguishing it from Upcoming; All is an inbox tray; groups get a
+folder rather than the same glyph as the lists inside them. Lists and smart
+lists share one circle size and one artwork size, so the sidebar reads as a
+single column instead of two conventions.
+
 **Motion.** One easing curve throughout, with one deliberate exception: a row
 being ticked off exits on an ease-*in*: the app's usual curve is front-loaded,
 which is right for something arriving and wrong for something leaving — the row

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import SyncBar from "./SyncBar.jsx";
+import { GroupIcon, ListIcon, SMART_ICONS } from "./icons.jsx";
 
 export default function Sidebar({
   smart, counts, lists, tags, scope, listId, tag,
@@ -45,6 +46,7 @@ export default function Sidebar({
       <nav className="smart">
         {smart.map((s) => {
           const active = scope === s.key && !listId && !tag;
+          const Glyph = SMART_ICONS[s.key];
           return (
             <button
               key={s.key}
@@ -53,7 +55,7 @@ export default function Sidebar({
               onClick={() => onSelect({ scope: s.key })}
             >
               <span className="glyph" style={{ background: s.color }}>
-                {s.glyph}
+                {Glyph ? <Glyph /> : null}
               </span>
               <span className="row-name">{s.label}</span>
               <span className="count">{counts[s.key] ?? ""}</span>
@@ -75,9 +77,13 @@ export default function Sidebar({
               }`}
               onClick={() => onSelect({ listId: l.id })}
             >
-              <span className="dot" style={{ background: l.color_hex || "#8E8E93" }} />
+              <span className="glyph" style={{ background: l.color_hex || "#8E8E93" }}>
+                {l.is_group ? <GroupIcon /> : <ListIcon />}
+              </span>
               <span className="row-name">{l.title}</span>
-              <span className="count">{l.open_count ?? 0}</span>
+              {/* A group's own count is always zero -- its reminders live in
+                  the lists inside it. */}
+              <span className="count">{l.is_group ? "" : l.open_count ?? 0}</span>
             </button>
           );
         })}

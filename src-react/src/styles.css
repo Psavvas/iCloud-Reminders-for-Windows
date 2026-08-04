@@ -358,18 +358,20 @@ input, textarea, select,
 }
 .smart-row:hover { background: var(--sel); }
 .smart-row.active { background: var(--sel); }
-.smart-row.active .list-name { font-weight: 600; }
+.smart-row.active .row-name { font-weight: 600; }
 .glyph {
-  width: 21px;
-  height: 21px;
+  width: 23px;
+  height: 23px;
   border-radius: 50%;
   flex: none;
   display: grid;
   place-items: center;
   color: #fff;
-  font-size: 11px;
   line-height: 1;
 }
+/* The artwork sits inside the circle rather than filling it, which is what
+   gives these the weight of an app icon instead of a bare symbol. */
+.glyph svg { width: 15px; height: 15px; display: block; }
 
 .section-label {
   font-size: 11px;
@@ -412,34 +414,13 @@ input, textarea, select,
 }
 .list-row:hover { background: var(--sel); }
 .list-row.active { background: var(--sel); }
-.list-row.active .list-name { font-weight: 600; }
+.list-row.active .row-name { font-weight: 600; }
 
-/* Colored circle with a small white list glyph, like Reminders' sidebar. */
-.dot {
-  width: 21px;
-  height: 21px;
-  border-radius: 50%;
-  flex: none;
-  position: relative;
-}
-.dot::after {
-  content: "";
-  position: absolute;
-  inset: 6px 5px;
-  background:
-    linear-gradient(#fff, #fff) 0 0 / 100% 1.5px no-repeat,
-    linear-gradient(#fff, #fff) 0 50% / 100% 1.5px no-repeat,
-    linear-gradient(#fff, #fff) 0 100% / 100% 1.5px no-repeat;
-  opacity: 0.95;
-}
-.list-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13.5px;
-}
-.list-row.group .list-name { font-weight: 600; }
+/* Lists use .glyph too now -- same circle, same artwork size as the smart
+   lists, so the sidebar reads as one column rather than two conventions. The
+   old .dot drew its three bars out of stacked background gradients at a fixed
+   1.5px, which did not survive a scale factor. */
+.list-row.group .row-name { font-weight: 600; }
 .count { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 
 .tag-section { padding: 12px 16px; border-top: 1px solid var(--hairline); }
