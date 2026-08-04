@@ -160,3 +160,23 @@ def test_the_build_workflow_exists_and_covers_windows():
     assert "reminders-sidecar.exe" in text, (
         "CI must verify the sidecar reached the bundle -- it has shipped without it"
     )
+
+
+def test_no_npm_script_drives_the_frontend_with_a_prefix_flag():
+    """
+    `npm --prefix src-react <cmd>` from a root npm script recursed on Windows:
+    the nested npm re-entered the root package, firing postinstall again about
+    twenty times until PATH outgrew the Windows limit. It does not reproduce on
+    Linux, so only CI caught it. scripts/ui.mjs is the safe way in.
+    """
+    scripts = json.loads((ROOT / "package.json").read_text())["scripts"]
+    offenders = {k: v for k, v in scripts.items() if "--prefix" in v}
+    assert not offenders, (
+        f"{offenders} shell out to npm with --prefix; use scripts/ui.mjs instead"
+    )
+
+    before_dev = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text())
+    before_dev = before_dev["build"].get("beforeDevCommand", "")
+    assert "--prefix" not in before_dev, (
+        f"beforeDevCommand {before_dev!r} has the same recursion hazard"
+    )

@@ -47,8 +47,8 @@ jobs:
       # built first. Nothing here needs an Apple account or a network call.
       - name: Build the frontend
         run: |
-          npm install --prefix src-react
-          npm run build --prefix src-react
+          node scripts/ui.mjs install
+          node scripts/ui.mjs run build
 
       - name: Install the sidecar
         run: pip install ./sidecar pytest

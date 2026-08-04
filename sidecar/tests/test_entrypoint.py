@@ -149,5 +149,8 @@ def test_the_ui_is_built_before_the_bundle():
     """
     pkg = json.loads((ROOT / "package.json").read_text())
     build = pkg["scripts"]["build"]
-    assert "src-react run build" in build
-    assert build.index("src-react run build") < build.index("tauri build")
+    assert "ui.mjs run build" in build, (
+        "the frontend build must go through scripts/ui.mjs; calling npm with "
+        "--prefix from a root script recursed on Windows"
+    )
+    assert build.index("ui.mjs run build") < build.index("tauri build")
