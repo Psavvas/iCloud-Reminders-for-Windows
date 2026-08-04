@@ -9,6 +9,7 @@ claims cheap enough to verify automatically.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -41,6 +42,18 @@ def _targets(md: str) -> list[tuple[str, str]]:
     return found
 
 
+# GitHub resolves these against the repository rather than the file tree: a
+# README served from /owner/repo/blob/branch/ climbs two levels to the repo
+# root. They are not paths on disk and must not be checked as though they were.
+GITHUB_RELATIVE = {
+    "../../releases",
+    "../../issues",
+    "../../pulls",
+    "../../actions",
+    "../../wiki",
+}
+
+
 def test_every_local_link_and_image_resolves(readme):
     slugs = _heading_slugs(readme)
     broken = []
@@ -50,6 +63,10 @@ def test_every_local_link_and_image_resolves(readme):
         if target.startswith("#"):
             if target[1:] not in slugs:
                 broken.append(f"{kind} anchor {target}")
+        elif target.rstrip("/") in GITHUB_RELATIVE:
+            continue
+        elif target.startswith("../"):
+            broken.append(f"{kind} {target} (escapes the repo, and is not a known GitHub link)")
         elif not (ROOT / target).is_file():
             broken.append(f"{kind} {target}")
     assert not broken, "README points at things that do not exist: " + ", ".join(broken)
@@ -102,4 +119,44 @@ def test_the_stated_test_count_is_current(request, readme):
     assert claims == {total}, (
         f"README says {sorted(claims)}, suite collects {total}. "
         f"Update the badge and the Tests section."
+    )
+
+
+# ------------------------------------------------------------- release wiring ---
+#
+# The version appears in two files and in the git tag. A tag that disagrees with
+# the config ships an installer claiming the wrong version, and later tells the
+# updater that a release it already has is newer. CI checks the tag; these check
+# the files agree with each other before it gets that far.
+
+import json
+
+
+def test_the_app_version_is_stated_once_and_agrees():
+    tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text())["version"]
+    pkg = json.loads((ROOT / "package.json").read_text())["version"]
+    assert tauri == pkg, (
+        f"tauri.conf.json says {tauri}, package.json says {pkg}. "
+        "Windows shows the former; the updater compares it too."
+    )
+
+
+def test_the_version_is_semver():
+    """The updater compares versions with semver rules; anything else is a coin toss."""
+    v = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text())["version"]
+    assert re.fullmatch(r"\d+\.\d+\.\d+(?:[-+].+)?", v), f"{v!r} is not semver"
+
+
+def test_the_build_workflow_exists_and_covers_windows():
+    """
+    Every build breakage this project has had was Windows-only and invisible
+    anywhere else. The workflow that catches them is worth asserting exists.
+    """
+    wf = ROOT / ".github" / "workflows" / "build.yml"
+    assert wf.is_file(), "no Windows build workflow"
+    text = wf.read_text()
+    assert "windows-latest" in text
+    assert "build-sidecar.ps1" in text, "CI must freeze the sidecar, not just the app"
+    assert "reminders-sidecar.exe" in text, (
+        "CI must verify the sidecar reached the bundle -- it has shipped without it"
     )

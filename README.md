@@ -90,9 +90,9 @@ that explain them.
 
 ## Using it
 
-There are no published releases — [build it](#building), which produces an MSI
-and an NSIS installer. Windows 11 has everything it needs at runtime; Windows 10
-may want the
+Grab the installer from the [Releases](../../releases) page, or
+[build it yourself](#building). Both produce an MSI and an NSIS installer.
+Windows 11 has everything it needs at runtime; Windows 10 may want the
 [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 
 ### First launch
@@ -357,6 +357,28 @@ depends on what changed:
 Windows caches app icons per executable, so a new icon may need
 `ie4uinit.exe -show` or a sign-out before it appears.
 
+### Releasing
+
+Every push builds on a real Windows runner
+([`.github/workflows/build.yml`](.github/workflows/build.yml)) and keeps the
+installer as an artifact. That exists because the build chain is the part that
+keeps breaking, and none of it can be exercised on Linux: PowerShell parse
+errors, a frozen sidecar that starts from the repo but not from the installer, a
+resource path that resolves differently under `tauri build`. Every one of those
+shipped at least once before CI existed.
+
+To cut a release, bump the version in **both** `package.json` and
+`src-tauri/tauri.conf.json`, then tag it:
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+CI refuses to build a tag that disagrees with the version in the config, so a
+mismatched tag fails in seconds rather than after a ten-minute Rust build. The
+installers are attached to the GitHub Release automatically.
+
 ### Development
 
 ```powershell
@@ -389,7 +411,7 @@ pip install ./sidecar pytest
 cd sidecar; python -m pytest
 ```
 
-143 tests, aimed at the things that are hard to check by looking:
+146 tests, aimed at the things that are hard to check by looking:
 
 - wall-clock and timezone conversion, including the all-day case
 - cache filtering, ordering and the Completed cap
