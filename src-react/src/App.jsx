@@ -9,6 +9,7 @@ import SettingsSheet from "./components/SettingsSheet.jsx";
 import PrintSheet from "./components/PrintSheet.jsx";
 import Onboarding from "./components/Onboarding.jsx";
 import Banner from "./components/Banner.jsx";
+import AuthNotice from "./components/AuthNotice.jsx";
 
 const SMART = [
   { key: "today", label: "Today", glyph: "◉", color: "#007aff" },
@@ -65,6 +66,9 @@ export default function App() {
   const [sheet, setSheet] = useState(null); // new | settings | print
   const [onboarding, setOnboarding] = useState(false);
   const [banner, setBanner] = useState(null);
+  // Sticky, unlike `banner`. Set when the session dies while the app is open,
+  // cleared only by signing back in -- see AuthNotice for why it is not a toast.
+  const [authExpired, setAuthExpired] = useState(false);
   // Null when idle; otherwise { determinate, percent, stage, ... } for the bar.
   const [sync, setSync] = useState(null);
 
@@ -155,11 +159,10 @@ export default function App() {
 
       if (st.authenticated || st.has_cache) {
         setPhase("app");
+        setAuthExpired(!st.authenticated && !st.restoring);
         await refreshAll();
         if (st.authenticated && !cfg.onboarded) {
           setOnboarding(true);
-        } else if (!st.authenticated && !st.restoring) {
-          toast("Your iCloud session expired — sign in again to sync.", "warn", 0);
         }
         return;
       }
@@ -228,7 +231,8 @@ export default function App() {
         const err = e.payload || {};
         setSync(null);
         if (err.code === "AUTH_REQUIRED") {
-          toast("Your iCloud session expired — sign in again to sync.", "warn", 0);
+          // Deliberately not a toast: this one has to outlive the next message.
+          setAuthExpired(true);
         } else if (err.code === "TERMS_REQUIRED") {
           toast("Apple needs you to accept updated iCloud terms.", "warn", 0);
         } else {
@@ -238,6 +242,7 @@ export default function App() {
       listen("sidecar://auth_changed", (e) => {
         const st = e.payload || {};
         if (st.authenticated) {
+          setAuthExpired(false);
           boot();
           return;
         }
@@ -245,9 +250,7 @@ export default function App() {
         // right thing to show — not on the way there. Someone already looking
         // at cached data gets told rather than silently left with stale rows.
         setGateStep((s) => (s === "restoring" ? "login" : s));
-        if (phase === "app") {
-          toast("Your iCloud session expired — sign in again to sync.", "warn", 0);
-        }
+        if (phase === "app") setAuthExpired(true);
       }),
       listen("sidecar://conflict", refreshStatus),
       listen("sidecar://ready", boot),
@@ -479,6 +482,12 @@ export default function App() {
           setSettings={setSettings}
           lists={lists}
           appleId={status.apple_id}
+          authExpired={authExpired}
+          onReauth={() => {
+            setSheet(null);
+            setPhase("gate");
+            setGateStep("login");
+          }}
           onClose={() => setSheet(null)}
           onFullSync={async () => {
             await call("sync", { full: true });
@@ -518,6 +527,17 @@ export default function App() {
           counts={counts}
           lists={lists}
           onDone={() => setOnboarding(false)}
+        />
+      )}
+
+      {authExpired && (
+        <AuthNotice
+          appleId={status.apple_id}
+          onSignIn={() => {
+            setSheet(null);
+            setPhase("gate");
+            setGateStep("login");
+          }}
         />
       )}
 

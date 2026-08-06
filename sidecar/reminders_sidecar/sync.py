@@ -305,7 +305,15 @@ class SyncEngine:
         try:
             return fn()
         except AuthRequired:
+            # The stale session has to go first. CloudKit answering 401 leaves
+            # the client object looking connected, and restore() treats an
+            # already-connected client as nothing to do -- so without this the
+            # retry re-used the dead session and expiry always reached the user.
+            self.client.invalidate()
             if not self.client.restore():
+                # Now that the session is really gone, say so. Otherwise the UI
+                # goes on showing a signed-in account that cannot sync.
+                self.emit("auth_changed", self.client.status())
                 raise
             LOGGER.info("iCloud session restored; retrying %s", getattr(fn, "__name__", fn))
             self.emit("auth_changed", self.client.status())
