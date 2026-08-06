@@ -1,14 +1,14 @@
 {
   "name": "reminders-sync",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "iCloud Reminders for Windows",
   "scripts": {
     "dev": "tauri dev",
-    "build": "node scripts/check-sidecar.mjs && npm --prefix src-react run build && tauri build",
-    "ui": "npm --prefix src-react run dev",
+    "build": "node scripts/check-sidecar.mjs && node scripts/ui.mjs run build && tauri build",
+    "ui": "node scripts/ui.mjs run dev",
     "tauri": "tauri",
-    "postinstall": "npm --prefix src-react install"
+    "postinstall": "node scripts/ui.mjs install"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

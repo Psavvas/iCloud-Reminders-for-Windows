@@ -17,7 +17,8 @@ function Switch({ label, checked, onChange, disabled }) {
 }
 
 export default function SettingsSheet({
-  settings, setSettings, lists, appleId, onClose, onFullSync, onSignOut, onThemeChange,
+  settings, setSettings, lists, appleId, authExpired, onClose, onFullSync, onSignOut,
+  onReauth, onThemeChange,
 }) {
   const [autostart, setAutostart] = useState(false);
   const [autostartNote, setAutostartNote] = useState("");
@@ -133,11 +134,29 @@ export default function SettingsSheet({
       <div className="settings-group">
         <div className="section-label">Account</div>
         <div className="setting-row static-row">
-          <span className="muted-text">{appleId || "Signed in"}</span>
-          <button className="danger small" onClick={onSignOut}>
-            Sign Out
-          </button>
+          {/* Without the expired state this row reads "signed in" whether or
+              not anything can actually sync, which is exactly how an expired
+              session went unnoticed. */}
+          <span className={authExpired ? "warn-text" : "muted-text"}>
+            {appleId || (authExpired ? "Signed out by Apple" : "Signed in")}
+            {authExpired && " — sign-in needed"}
+          </span>
+          {authExpired ? (
+            <button className="primary small" onClick={onReauth}>
+              Sign In
+            </button>
+          ) : (
+            <button className="danger small" onClick={onSignOut}>
+              Sign Out
+            </button>
+          )}
         </div>
+        {authExpired && (
+          <p className="hint tiny">
+            Apple ended this session, so syncing has stopped. Everything you
+            have is still cached, and edits are queued until you sign back in.
+          </p>
+        )}
         <Switch
           label="Stay signed in"
           checked={settings.remember_password !== false}

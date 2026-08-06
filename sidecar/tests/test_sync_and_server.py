@@ -72,6 +72,9 @@ class FakeClient:
     def restore(self):
         return False
 
+    def invalidate(self):
+        self.connected = False
+
     def status(self):
         return {"authenticated": self.connected, "apple_id": "a@b.c"}
 

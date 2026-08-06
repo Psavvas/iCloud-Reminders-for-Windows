@@ -241,3 +241,81 @@ def _join_threads():
     for t in threading.enumerate():
         if t.name in ("restore", "sync", "push") and t is not threading.current_thread():
             t.join(timeout=3)
+
+
+# ------------------------------------------------------- expiry, unstubbed ---
+#
+# The tests above stub client.restore, which is what let the bug below live:
+# the recovery path was only ever exercised against a fake that always said it
+# worked. These use the real method.
+
+
+def test_restore_rebuilds_a_session_that_apple_has_expired():
+    """
+    CloudKit answering 401 leaves the PyiCloudService object in place -- it has
+    no idea its token died -- so the client still looks connected. restore()
+    treats a connected client as nothing to do, so it returned True without
+    reconnecting and the caller retried on the same dead session.
+    """
+    client = FakeKeyringClient()
+    client.saved = {"a@b.c": "hunter2"}
+    client._api = object()  # a live-looking, actually-expired session
+    client._pending_2fa = False
+
+    assert client.connected  # this is what fooled restore()
+
+    client.invalidate()
+    assert not client.connected
+    assert client.restore() is True
+    assert client.connects == [None], "restore must reconnect from the keyring"
+
+
+def test_an_expired_session_does_not_keep_reporting_itself_as_signed_in():
+    """
+    The status the UI reads has to agree with reality, or the app shows an
+    account that cannot sync and never says why.
+    """
+    client = FakeKeyringClient()
+    client._api = object()
+    assert client.status()["authenticated"] is True
+    client.invalidate()
+    assert client.status()["authenticated"] is False
+
+
+def test_the_sync_retry_drops_the_dead_session_before_restoring(tmp_path):
+    """The whole point of the retry: the second attempt must be a new session."""
+    from reminders_sidecar.db import Cache
+
+    cache = Cache(tmp_path / "r4.db")
+    client = FakeKeyringClient()
+    client.saved = {"a@b.c": "hunter2"}
+    client._api = object()
+
+    order: list[str] = []
+    calls = {"n": 0}
+
+    def expiring_lists():
+        calls["n"] += 1
+        order.append(f"lists:{calls['n']}")
+        if calls["n"] == 1:
+            raise AuthRequired("Your iCloud session expired")
+        return [{"id": "List/A", "title": "Inbox", "color_hex": None, "count": 0}]
+
+    client.lists = expiring_lists  # type: ignore[assignment]
+    client.reminders_for = lambda list_id: ([], {})  # type: ignore[assignment]
+    client.sync_cursor = lambda: "c0"  # type: ignore[assignment]
+
+    real_invalidate = client.invalidate
+
+    def traced_invalidate():
+        order.append("invalidate")
+        real_invalidate()
+
+    client.invalidate = traced_invalidate  # type: ignore[assignment]
+
+    engine = SyncEngine(cache, client)
+    engine.sync_now(full=True)
+
+    assert order == ["lists:1", "invalidate", "lists:2"], order
+    assert client.connects == [None], "the retry must run on a rebuilt session"
+    cache.close()

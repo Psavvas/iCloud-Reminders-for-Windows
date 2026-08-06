@@ -179,6 +179,25 @@ class ICloudClient:
         except Exception:  # noqa: BLE001
             return False
 
+    def invalidate(self) -> None:
+        """
+        Drop the in-memory session so a restore actually rebuilds it.
+
+        A 401 from CloudKit does not disturb the PyiCloudService object -- it
+        has no idea its token stopped working -- so `connected` stays True. That
+        made restore() below return True without reconnecting, which quietly
+        turned the one-retry recovery into a no-op and sent every expiry
+        straight to the sign-in screen. It also left status() claiming
+        authenticated while nothing could sync, which is what "it looks like
+        you're still logged in" was.
+
+        Only the live session is discarded. The keyring password, the cookies
+        and the trust token all survive, which is what lets the reconnect
+        happen without a 2FA prompt.
+        """
+        self._api = None
+        self._pending_2fa = False
+
     def restore(self) -> bool:
         """
         Re-establish a session without asking the user anything.
