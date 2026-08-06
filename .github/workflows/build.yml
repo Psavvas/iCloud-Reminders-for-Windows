@@ -96,13 +96,29 @@ jobs:
           }
           Write-Host "Version $cfg matches the tag."
 
+      # createUpdaterArtifacts makes `tauri build` sign the installer, and it
+      # fails outright without a key. Better to say which secret is missing now
+      # than to discover it eleven minutes into a Rust build.
+      - name: Check the signing key is available
+        run: |
+          if (-not "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}") {
+            throw "TAURI_SIGNING_PRIVATE_KEY is not set. Add it under Settings -> Secrets and variables -> Actions. It is the private key from `npm run tauri signer generate`; the matching public key is already in tauri.conf.json."
+          }
+          Write-Host "Signing key present."
+
       - name: Install npm dependencies
         run: npm install
 
       - name: Freeze the Python sidecar
         run: .\scripts\build-sidecar.ps1
 
+      # The signing key turns the build's updater artifacts into something the
+      # installed app will accept. Without these two the build fails; with a
+      # mismatched key it succeeds and every client silently rejects the update.
       - name: Build the installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run build
 
       # Proof the sidecar actually travelled inside the installers. It has
@@ -170,8 +186,46 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $files = Get-ChildItem -Recurse -Path src-tauri\target\release\bundle -Include *.msi, *-setup.exe |
-                   Select-Object -ExpandProperty FullName
-          gh release create "${{ github.ref_name }}" $files `
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $nsis = "src-tauri\target\release\bundle\nsis"
+          $setup = Get-ChildItem -Path $nsis -Filter *-setup.exe | Select-Object -First 1
+          $sig = Get-ChildItem -Path $nsis -Filter *-setup.exe.sig | Select-Object -First 1
+          if (-not $setup) { throw "no NSIS installer to publish" }
+          if (-not $sig) {
+            throw "no .sig beside the installer -- the build did not produce updater artifacts, so this release would be invisible to installed apps."
+          }
+          $msi = Get-ChildItem -Recurse -Path src-tauri\target\release\bundle -Filter *.msi |
+                 Select-Object -First 1
+
+          gh release create "${{ github.ref_name }}" $setup.FullName $msi.FullName `
             --title "${{ github.ref_name }}" `
             --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+
+          # latest.json is what installed copies poll. It has to name the asset
+          # by the URL GitHub actually serves, and GitHub rewrites spaces in
+          # asset names ("iCloud Reminders_..." becomes "iCloud.Reminders_..."),
+          # so the local filename is the wrong thing to build a URL from. Ask
+          # the API for the name it gave the asset.
+          $release = gh release view "${{ github.ref_name }}" --json assets | ConvertFrom-Json
+          $asset = $release.assets | Where-Object { $_.name -like "*-setup.exe" } | Select-Object -First 1
+          if (-not $asset) { throw "the installer is not among the uploaded assets" }
+
+          $manifest = [ordered]@{
+            version = "${{ github.ref_name }}".TrimStart("v")
+            notes = "See the release notes for ${{ github.ref_name }}."
+            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                signature = (Get-Content $sig.FullName -Raw).Trim()
+                url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$($asset.name)"
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content latest.json -Encoding utf8
+          Get-Content latest.json | Write-Host
+
+          gh release upload "${{ github.ref_name }}" latest.json
+          if ($LASTEXITCODE -ne 0) { throw "could not upload latest.json" }

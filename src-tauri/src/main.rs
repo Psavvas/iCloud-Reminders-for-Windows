@@ -243,6 +243,74 @@ fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
     mgr.is_enabled().map_err(|e| e.to_string())
 }
 
+// ------------------------------------------------------------------ updates --
+//
+// The check runs here rather than in the UI for the same reason notifications
+// and dialogs do: the frontend has no Tauri dependencies beyond the bridge, and
+// keeping it that way is worth more than saving a command.
+//
+// Nothing installs itself. A found update is announced and waits, because this
+// app sits in the tray for weeks and restarting underneath someone mid-edit
+// would be its own bug.
+
+/// How long after launch to look, and how often after that. The delay keeps the
+/// check off the startup path, where the sidecar spawn matters more.
+const UPDATE_FIRST_CHECK_SECONDS: u64 = 30;
+const UPDATE_EVERY_SECONDS: u64 = 6 * 60 * 60;
+
+async fn update_loop(app: AppHandle) {
+    sleep(Duration::from_secs(UPDATE_FIRST_CHECK_SECONDS)).await;
+    let mut ticker = interval(Duration::from_secs(UPDATE_EVERY_SECONDS));
+    loop {
+        ticker.tick().await;
+        match check_once(&app).await {
+            Ok(Some(version)) => {
+                log::info!("update available: {version}");
+                let _ = app.emit("app://update_available", json!({ "version": version }));
+            }
+            Ok(None) => {}
+            // Offline, or GitHub having a moment. Not worth telling anyone --
+            // there is another check along in six hours.
+            Err(e) => log::warn!("update check failed: {e}"),
+        }
+    }
+}
+
+async fn check_once(app: &AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let found = updater.check().await.map_err(|e| e.to_string())?;
+    Ok(found.map(|u| u.version))
+}
+
+#[tauri::command]
+async fn check_for_update(app: AppHandle) -> Result<Option<String>, String> {
+    check_once(&app).await
+}
+
+/// Download, install, and relaunch. Returns only on failure -- on success the
+/// process is replaced, so there is nothing to return to.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+        return Err("There is no update to install.".into());
+    };
+
+    // The sidecar holds the SQLite file open, and the installer is about to
+    // replace its executable. Dropping it here kills the child (the command is
+    // spawned with kill_on_drop), which is what restart_sidecar relies on too.
+    app.state::<AppState>().set(None);
+
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+
+    app.restart();
+}
+
 #[tauri::command]
 fn sidecar_status(state: State<'_, AppState>) -> Value {
     json!({
@@ -412,6 +480,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -451,6 +520,7 @@ fn main() {
             tauri::async_runtime::spawn(notification_loop(handle.clone()));
             tauri::async_runtime::spawn(sync_loop(handle.clone()));
             tauri::async_runtime::spawn(supervise(handle.clone()));
+            tauri::async_runtime::spawn(update_loop(handle.clone()));
 
             Ok(())
         })
@@ -467,7 +537,9 @@ fn main() {
             sidecar_status,
             restart_sidecar,
             get_autostart,
-            set_autostart
+            set_autostart,
+            check_for_update,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running application");

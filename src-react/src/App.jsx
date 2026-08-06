@@ -10,6 +10,7 @@ import PrintSheet from "./components/PrintSheet.jsx";
 import Onboarding from "./components/Onboarding.jsx";
 import Banner from "./components/Banner.jsx";
 import AuthNotice from "./components/AuthNotice.jsx";
+import UpdateNotice from "./components/UpdateNotice.jsx";
 
 const SMART = [
   { key: "today", label: "Today", glyph: "◉", color: "#007aff" },
@@ -69,6 +70,8 @@ export default function App() {
   // Sticky, unlike `banner`. Set when the session dies while the app is open,
   // cleared only by signing back in -- see AuthNotice for why it is not a toast.
   const [authExpired, setAuthExpired] = useState(false);
+  // Version string once the shell has found a newer release, else null.
+  const [updateVersion, setUpdateVersion] = useState(null);
   // Null when idle; otherwise { determinate, percent, stage, ... } for the bar.
   const [sync, setSync] = useState(null);
 
@@ -270,6 +273,9 @@ export default function App() {
       listen("app://notified", () => {
         loadRows();
         loadShell();
+      }),
+      listen("app://update_available", (e) => {
+        setUpdateVersion((e.payload || {}).version || null);
       }),
     ];
     return () => offs.forEach((off) => off());
@@ -527,6 +533,13 @@ export default function App() {
           counts={counts}
           lists={lists}
           onDone={() => setOnboarding(false)}
+        />
+      )}
+
+      {updateVersion && !authExpired && (
+        <UpdateNotice
+          version={updateVersion}
+          onError={(msg) => toast("Couldn't install the update: " + msg, "warn")}
         />
       )}
 

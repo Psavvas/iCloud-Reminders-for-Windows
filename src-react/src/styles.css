@@ -981,6 +981,39 @@ input, textarea, select,
 
 .warn-text { color: var(--orange); }
 
+/* update ready ----------------------------------------------------------- */
+/* Same shape as the auth notice, in blue: informational, not a problem. */
+.update-notice {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(760px, 88vw);
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--blue) 55%, transparent);
+  border-left: 3px solid var(--blue);
+  border-radius: 12px;
+  padding: 12px 16px;
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.update-notice ~ .banner { bottom: 96px; }
+.update-notice-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--blue);
+}
+.update-notice-text { flex: 1; }
+.update-notice-text strong { font-weight: 600; }
+.update-notice button { flex: none; }
+
 @media (prefers-reduced-motion: reduce) {
   .sheet[open] { animation: none; }
   .search-box { transition: none; }

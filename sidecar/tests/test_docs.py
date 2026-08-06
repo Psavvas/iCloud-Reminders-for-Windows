@@ -167,6 +167,47 @@ def test_the_build_workflow_exists_and_covers_windows():
     )
 
 
+def test_the_updater_is_wired_end_to_end():
+    """
+    Four things have to agree or updates fail silently -- the worst mode, since
+    a client that cannot read the manifest concludes there is nothing new and
+    says nothing. Each of these was absent at some point while wiring this up.
+    """
+    cfg = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text())
+    updater = cfg.get("plugins", {}).get("updater", {})
+
+    assert cfg["bundle"].get("createUpdaterArtifacts") is True, (
+        "without this the build emits no .sig, so releases are unusable to the updater"
+    )
+    assert updater.get("pubkey"), "no public key, so every update would be rejected"
+    endpoints = updater.get("endpoints") or []
+    assert any(e.endswith("latest.json") for e in endpoints), endpoints
+
+    # The plugin has to be a dependency and be registered; either one missing
+    # compiles fine in isolation and does nothing at runtime.
+    cargo = (ROOT / "src-tauri" / "Cargo.toml").read_text()
+    assert "tauri-plugin-updater" in cargo
+    main_rs = (ROOT / "src-tauri" / "src" / "main.rs").read_text()
+    assert "tauri_plugin_updater" in main_rs
+    caps = json.loads(
+        (ROOT / "src-tauri" / "capabilities" / "default.json").read_text()
+    )
+    assert "updater:default" in caps["permissions"], (
+        "the command is denied without the capability, at runtime only"
+    )
+
+
+def test_the_release_job_publishes_a_manifest_and_signs_the_build():
+    """A release without latest.json is invisible to every installed copy."""
+    wf = (ROOT / ".github" / "workflows" / "build.yml").read_text()
+    assert "latest.json" in wf, "the release job must publish the update manifest"
+    assert "TAURI_SIGNING_PRIVATE_KEY" in wf, "the build must be given the signing key"
+    assert "-setup.exe.sig" in wf, (
+        "the release job must refuse to publish without the signature beside the "
+        "installer, or the manifest would point at something clients reject"
+    )
+
+
 def test_no_npm_script_drives_the_frontend_with_a_prefix_flag():
     """
     `npm --prefix src-react <cmd>` from a root npm script recursed on Windows:
