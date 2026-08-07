@@ -46,12 +46,18 @@ from harness import MARKER, connect  # noqa: E402
 from list_create_experiment import delete_list  # noqa: E402
 
 
-def _raw_records(service: Any, ids: list[str]) -> dict[str, Any]:
-    """The typed model drops Deleted and recordChangeTag; both matter here."""
+def _raw_records(svc: Any, ids: list[str]) -> dict[str, Any]:
+    """
+    The typed model drops Deleted and recordChangeTag; both matter here.
+
+    Takes the *reminders* service, not PyiCloudService -- `_raw` hangs off the
+    former. Everything below is consistent about that, because mixing the two is
+    what broke the first version of this script.
+    """
     from pyicloud.common.cloudkit import CKRecord
     from pyicloud.services.reminders._constants import _REMINDERS_ZONE_REQ
 
-    resp = service.reminders._raw.lookup(  # noqa: SLF001
+    resp = svc._raw.lookup(  # noqa: SLF001
         record_names=ids, zone_id=_REMINDERS_ZONE_REQ
     )
     return {
@@ -94,9 +100,12 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    service = connect(apple_id=args.apple_id, accept_terms=args.accept_terms)
+    # Resolved once. delete_list, _raw_records and lists() all want the
+    # reminders service -- run_spike.py passes exactly this -- and reaching for
+    # PyiCloudService instead is an AttributeError only at the point of writing.
+    svc = connect(apple_id=args.apple_id, accept_terms=args.accept_terms).reminders
 
-    everything = list(service.reminders.lists())
+    everything = list(svc.lists())
     needle = args.marker.lower()
     # str() rather than .title directly: a record written as ENCRYPTED_BYTES
     # stringifies to the literal b'...' form, and that is exactly what is being
@@ -108,7 +117,7 @@ def main() -> int:
         print(f"None contain {args.marker!r}. Nothing to do.")
         return 0
 
-    raw = _raw_records(service, [l.id for l in strays])
+    raw = _raw_records(svc, [l.id for l in strays])
 
     print(f"{len(strays)} matching {args.marker!r}:\n")
     live: list[tuple[Any, Optional[str]]] = []
@@ -141,7 +150,33 @@ def main() -> int:
 
     for l, tag in live:
         print(f"Deleting {str(l.title)!r} ({l.id}) ... ", end="", flush=True)
-        print(delete_list(service, l.id, tag))
+        print(delete_list(svc, l.id, tag))
+
+    # Read it back rather than trusting the message above. modify() can return
+    # 200 with per-record errors embedded -- list_create_experiment says so in
+    # as many words -- so "soft-deleted" means the call did not raise, not that
+    # the record changed. The flag is the only answer that counts.
+    print("\nVerifying:")
+    after = _raw_records(svc, [l.id for l, _ in live])
+    stuck = []
+    for l, _ in live:
+        rec = after.get(l.id)
+        if rec is None:
+            print(f"  {l.id}: gone from the zone entirely.")
+            continue
+        deleted, _, _ = _describe(rec)
+        print(f"  {l.id}: Deleted flag is now {deleted}")
+        if not deleted:
+            stuck.append(l)
+
+    if stuck:
+        print(
+            "\nApple accepted the request and the flag did not change, which puts\n"
+            "this with list rename and delete on the list of writes it takes and\n"
+            "ignores. Send me this output -- the remaining option is to hide it in\n"
+            "the app, which is entirely under our control."
+        )
+        return 1
 
     print(
         "\nDone. The Windows app rebuilds its list table from the server on every\n"
