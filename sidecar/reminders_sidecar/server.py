@@ -29,6 +29,7 @@ from .db import Cache, from_iso, to_iso, utcnow
 from .icloud import AuthRequired, ICloudClient, SidecarError, TwoFactorRequired
 from .notifications import plan_notifications
 from .sync import CURSOR_KEY, LAST_SYNC_KEY, SyncEngine
+from .timeutil import local_zone
 
 LOGGER = logging.getLogger("sidecar")
 
@@ -234,7 +235,7 @@ class Server:
             "list_id": p["list_id"],
             "title": p.get("title") or "",
             "description": p.get("description") or "",
-            "due_date": self._norm_due(p.get("due_date")),
+            "due_date": self._norm_due(p.get("due_date"), bool(p.get("all_day"))),
             "priority": int(p.get("priority") or 0),
             "completed": False,
             "flagged": bool(p.get("flagged")),
@@ -255,8 +256,19 @@ class Server:
             for k, v in p.items()
             if k in ("title", "description", "priority", "completed", "flagged")
         }
+        # all_day only moves when it is sent. Editing the date of an all-day
+        # reminder should leave it all-day, and editing a timed one should leave
+        # it timed -- the toggle is what changes the kind, not the date field.
+        if "all_day" in p:
+            fields["all_day"] = 1 if p["all_day"] else 0
+        all_day = bool(fields.get("all_day", current.get("all_day")))
+
         if "due_date" in p:
-            fields["due_date"] = self._norm_due(p["due_date"])
+            fields["due_date"] = self._norm_due(p["due_date"], all_day)
+        elif "all_day" in p and all_day and current.get("due_date"):
+            # Switched to all-day without touching the date: the old time has to
+            # go, or this is an "all-day" reminder that still notifies at 14:30.
+            fields["due_date"] = self._norm_due(current["due_date"], True)
         if "completed" in fields:
             fields["completed"] = 1 if fields["completed"] else 0
         if "flagged" in fields:
@@ -278,17 +290,31 @@ class Server:
         return {"deleted": rid}
 
     @staticmethod
-    def _norm_due(value: Any) -> Optional[str]:
-        """Accept ISO strings or epoch millis; always store tz-aware UTC ISO."""
+    def _norm_due(value: Any, all_day: bool = False) -> Optional[str]:
+        """
+        Accept ISO strings or epoch millis; always store tz-aware UTC ISO.
+
+        An all-day reminder's instant is local midnight -- notify_at shifts off
+        it to find the morning, and end_of_day counts from it to decide overdue.
+        Both break on an "all-day" reminder stored at 14:30, and a date input
+        that yields midnight does so only by convention. Snapping here means
+        nothing downstream has to trust the caller.
+        """
         if value in (None, ""):
             return None
         if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(value / 1000.0, tz=timezone.utc).isoformat()
-        dt = datetime.fromisoformat(str(value))
-        if dt.tzinfo is None:
-            # A bare local datetime from a date picker: interpret in the user's
-            # zone, never as UTC. Apple would silently assume UTC here.
-            dt = dt.astimezone()
+            dt = datetime.fromtimestamp(value / 1000.0, tz=timezone.utc)
+        else:
+            dt = datetime.fromisoformat(str(value))
+            if dt.tzinfo is None:
+                # A bare local datetime from a date picker: interpret in the
+                # user's zone, never as UTC. Apple would silently assume UTC.
+                dt = dt.astimezone()
+        if all_day:
+            # Midnight where the user is, not in UTC -- the date is the point.
+            dt = dt.astimezone(local_zone()).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
         return dt.astimezone(timezone.utc).isoformat()
 
     # sync ------------------------------------------------------------------

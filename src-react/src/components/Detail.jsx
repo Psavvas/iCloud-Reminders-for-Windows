@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { PRIORITIES, formatDue, toLocalInput } from "../format.js";
+import { PRIORITIES, formatDue, reshapeDue, toLocalInput } from "../format.js";
 
 export default function Detail({ reminder, lists, onSave, onDelete }) {
   const [draft, setDraft] = useState(null);
@@ -12,7 +12,8 @@ export default function Detail({ reminder, lists, onSave, onDelete }) {
         ? {
             title: reminder.title || "",
             description: reminder.description || "",
-            due: toLocalInput(reminder.due_date),
+            due: reshapeDue(toLocalInput(reminder.due_date), !!reminder.all_day),
+            allDay: !!reminder.all_day,
             priority: String(Number(reminder.priority) || 0),
           }
         : null
@@ -52,7 +53,7 @@ export default function Detail({ reminder, lists, onSave, onDelete }) {
         <div className="row">
           <input
             id="d-due"
-            type="datetime-local"
+            type={draft.allDay ? "date" : "datetime-local"}
             value={draft.due}
             onChange={(e) => set("due", e.target.value)}
           />
@@ -60,12 +61,19 @@ export default function Detail({ reminder, lists, onSave, onDelete }) {
             Clear
           </button>
         </div>
-        {reminder.all_day && (
-          <p className="hint tiny">
-            All-day reminder — it has a date but no time. Saving a time here
-            turns it into a timed one.
-          </p>
-        )}
+        <label className="switch-row inline-switch">
+          <span>All day</span>
+          <input
+            type="checkbox"
+            checked={draft.allDay}
+            onChange={(e) => {
+              const on = e.target.checked;
+              // Type and value change in one commit; separately, the browser
+              // rejects the value it does not recognise and blanks the field.
+              setDraft((d) => ({ ...d, allDay: on, due: reshapeDue(d.due, on) }));
+            }}
+          />
+        </label>
 
         <label htmlFor="d-prio">Priority</label>
         <select
@@ -98,8 +106,15 @@ export default function Detail({ reminder, lists, onSave, onDelete }) {
                 title: draft.title,
                 description: draft.description,
                 // datetime-local has no zone; the sidecar resolves it against
-                // the local zone rather than letting Apple read it as UTC.
-                due_date: draft.due ? draft.due + ":00" : null,
+                // the local zone rather than letting Apple read it as UTC. An
+                // all-day value is a bare date, and gets snapped to midnight
+                // there, so it is sent as-is.
+                due_date: draft.due
+                  ? draft.allDay
+                    ? draft.due
+                    : draft.due + ":00"
+                  : null,
+                all_day: draft.allDay,
                 priority: Number(draft.priority),
               })
             }

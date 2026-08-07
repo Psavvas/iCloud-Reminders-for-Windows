@@ -448,6 +448,10 @@ class ICloudClient:
                 due_date=due,
                 priority=int(payload.get("priority") or 0),
                 flagged=bool(payload.get("flagged")),
+                # Without this every reminder Windows creates is a timed one,
+                # whatever the app was told. The server has already snapped the
+                # instant to local midnight, which is the shape Apple stores.
+                all_day=bool(payload.get("all_day")),
             )
         except Exception as exc:  # noqa: BLE001
             raise self._classify(exc) from exc
@@ -486,6 +490,8 @@ class ICloudClient:
         if "deleted" in payload:
             # Deletion is a soft flag, so restoring is just clearing it.
             rem.deleted = bool(payload["deleted"])
+        if "all_day" in payload:
+            rem.all_day = bool(payload["all_day"])
         if "due_date" in payload:
             due = payload["due_date"]
             if isinstance(due, str):
@@ -493,8 +499,10 @@ class ICloudClient:
             # Re-encoded in whatever zone this record already carries, so
             # editing a reminder pinned to another zone doesn't quietly move it.
             rem.due_date = instant_to_floating(_as_utc(due), rem.time_zone)
-            # A time was chosen, so it is no longer an all-day reminder.
-            if due is not None:
+            # A bare due date still implies a time was picked -- but only when
+            # the caller said nothing about all_day. Assuming it unconditionally
+            # is what made all-day reminders impossible to keep.
+            if due is not None and "all_day" not in payload:
                 rem.all_day = False
 
         try:

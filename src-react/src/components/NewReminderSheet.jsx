@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import Sheet from "./Sheet.jsx";
-import { PRIORITIES } from "../format.js";
+import { PRIORITIES, reshapeDue } from "../format.js";
 
 export default function NewReminderSheet({ lists, defaultListId, onClose, onCreate }) {
   const usable = lists.filter((l) => !l.is_group);
@@ -14,6 +14,7 @@ export default function NewReminderSheet({ lists, defaultListId, onClose, onCrea
     listId: fallback || "",
     priority: "0",
     due: "",
+    allDay: false,
   });
   const titleRef = useRef(null);
   useEffect(() => titleRef.current?.focus(), []);
@@ -26,7 +27,11 @@ export default function NewReminderSheet({ lists, defaultListId, onClose, onCrea
       list_id: form.listId,
       title: form.title.trim(),
       description: form.notes,
-      due_date: form.due ? form.due + ":00" : null,
+      // A date input yields "2026-08-07"; datetime-local yields
+      // "2026-08-07T14:30". The sidecar snaps an all-day one to local midnight,
+      // so the exact time sent with it does not matter.
+      due_date: form.due ? (form.allDay ? form.due : form.due + ":00") : null,
+      all_day: form.allDay,
       priority: Number(form.priority),
     });
   };
@@ -91,7 +96,7 @@ export default function NewReminderSheet({ lists, defaultListId, onClose, onCrea
         <div className="row">
           <input
             id="n-due"
-            type="datetime-local"
+            type={form.allDay ? "date" : "datetime-local"}
             value={form.due}
             onChange={(e) => set("due", e.target.value)}
           />
@@ -99,6 +104,19 @@ export default function NewReminderSheet({ lists, defaultListId, onClose, onCrea
             Clear
           </button>
         </div>
+        <label className="switch-row inline-switch">
+          <span>All day</span>
+          <input
+            type="checkbox"
+            checked={form.allDay}
+            onChange={(e) => {
+              const on = e.target.checked;
+              // Reshape together: the input type and its value have to change
+              // in the same commit or the browser discards the value.
+              setForm((f) => ({ ...f, allDay: on, due: reshapeDue(f.due, on) }));
+            }}
+          />
+        </label>
 
         <div className="sheet-actions">
           <button type="button" className="ghost" onClick={onClose}>

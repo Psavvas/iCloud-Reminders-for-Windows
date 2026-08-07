@@ -59,6 +59,22 @@ export function toLocalInput(iso) {
   )}:${p(d.getMinutes())}`;
 }
 
+/**
+ * Reshape a due-input value when the all-day toggle moves.
+ *
+ * The two inputs speak different dialects -- `date` wants "2026-08-07",
+ * `datetime-local` wants "2026-08-07T09:00" -- and handing either the other's
+ * string silently blanks the field. Both editors share this so they cannot
+ * disagree about which way round it goes.
+ */
+export function reshapeDue(value, allDay) {
+  if (!value) return "";
+  if (allDay) return value.slice(0, 10);
+  // Coming back from all-day there is no time to restore, so pick a sensible
+  // one rather than 00:00, which reads as "no time" all over again.
+  return value.length > 10 ? value : `${value}T09:00`;
+}
+
 export const PRIORITIES = [
   { value: 0, label: "None" },
   { value: 1, label: "High" },

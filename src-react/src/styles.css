@@ -878,7 +878,9 @@ input, textarea, select,
 }
 .setting-row select { width: auto; min-width: 150px; flex: none; }
 .setting-row.static-row { justify-content: space-between; }
-.sheet .switch-row {
+/* Not scoped to .sheet: the detail pane and onboarding use these too, and
+   scoping them left those rendering as raw Windows checkboxes. */
+.switch-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -890,7 +892,7 @@ input, textarea, select,
   letter-spacing: -0.01em;
   color: var(--text);
 }
-.sheet .switch-row input[type="checkbox"] {
+.switch-row input[type="checkbox"] {
   appearance: none;
   -webkit-appearance: none;
   width: 42px;
@@ -903,7 +905,7 @@ input, textarea, select,
   transition: background 160ms ease;
   padding: 0;
 }
-.sheet .switch-row input[type="checkbox"]::after {
+.switch-row input[type="checkbox"]::after {
   content: "";
   position: absolute;
   top: 2px;
@@ -915,9 +917,9 @@ input, textarea, select,
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
   transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
-.sheet .switch-row input[type="checkbox"]:checked { background: var(--green); }
-.sheet .switch-row input[type="checkbox"]:checked::after { transform: translateX(17px); }
-.sheet .switch-row input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
+.switch-row input[type="checkbox"]:checked { background: var(--green); }
+.switch-row input[type="checkbox"]:checked::after { transform: translateX(17px); }
+.switch-row input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
 .wide-btn { width: 100%; margin-top: 6px; }
 
 /* banner ----------------------------------------------------------------- */
@@ -1017,7 +1019,7 @@ input, textarea, select,
 @media (prefers-reduced-motion: reduce) {
   .sheet[open] { animation: none; }
   .search-box { transition: none; }
-  .sheet .switch-row input[type="checkbox"]::after { transition: none; }
+  .switch-row input[type="checkbox"]::after { transition: none; }
 }
 
 /* onboarding ------------------------------------------------------------- */

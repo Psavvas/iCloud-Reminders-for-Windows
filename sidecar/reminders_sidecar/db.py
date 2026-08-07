@@ -430,6 +430,9 @@ class Cache:
             "flagged",
             "list_id",
             "deleted",
+            # Without this the optimistic write drops it and the toggle looks
+            # broken until the next sync brings the truth back.
+            "all_day",
         }
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
