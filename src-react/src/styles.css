@@ -675,6 +675,43 @@ input, textarea, select,
 .reminder:active { background: var(--fill-2); }
 .reminder:hover { background: var(--sel); }
 
+/* composer --------------------------------------------------------------- */
+/*
+ * Deliberately the same geometry as a reminder row: the point is that the text
+ * appears where the reminder will, so anything that shifts on commit undoes it.
+ * The dot matches the checkbox above it in size and position, but is dimmer --
+ * there is nothing to tick yet.
+ */
+.reminder.composer { cursor: text; }
+.reminder.composer:hover { background: transparent; }
+.composer-dot {
+  width: 19px;
+  height: 19px;
+  margin: 1px 0 0;
+  border: 1.6px dashed var(--hairline);
+  border-radius: 50%;
+  flex: none;
+}
+.composer-input {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  width: auto;
+  flex: 1;
+  font: inherit;
+  letter-spacing: inherit;
+  color: var(--text);
+  line-height: 1.4;
+}
+.composer-input::placeholder { color: var(--muted); }
+/* The row already shows focus by holding a caret; a ring around the whole
+   width of the list is noise. */
+.composer-input:focus { outline: none; }
+.composer-input:focus ~ .composer-dot,
+.reminder.composer:focus-within .composer-dot { border-color: var(--blue); }
+.composer-details { flex: none; align-self: center; }
+
 /* Ticking something off is the most common action in the app, and the row
    vanishing between two frames reads as a glitch rather than a result. It
    fades out first; the reload that actually removes it waits for this. */

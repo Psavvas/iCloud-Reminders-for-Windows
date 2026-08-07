@@ -2,14 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import Sheet from "./Sheet.jsx";
 import { PRIORITIES, reshapeDue } from "../format.js";
 
-export default function NewReminderSheet({ lists, defaultListId, onClose, onCreate }) {
+export default function NewReminderSheet({
+  lists, defaultListId, initialTitle = "", onClose, onCreate,
+}) {
   const usable = lists.filter((l) => !l.is_group);
   const fallback =
     defaultListId ||
     (usable.find((l) => (l.title || "").toLowerCase() === "inbox") || usable[0] || {}).id;
 
   const [form, setForm] = useState({
-    title: "",
+    title: initialTitle,
     notes: "",
     listId: fallback || "",
     priority: "0",
@@ -17,7 +19,14 @@ export default function NewReminderSheet({ lists, defaultListId, onClose, onCrea
     allDay: false,
   });
   const titleRef = useRef(null);
-  useEffect(() => titleRef.current?.focus(), []);
+  const dueRef = useRef(null);
+  // With a title already carried in from the composer, putting the caret back
+  // on it means retyping past it; the point of Details is the rest.
+  useEffect(() => {
+    if (initialTitle) dueRef.current?.focus();
+    else titleRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   const submit = (e) => {
@@ -96,6 +105,7 @@ export default function NewReminderSheet({ lists, defaultListId, onClose, onCrea
         <div className="row">
           <input
             id="n-due"
+            ref={dueRef}
             type={form.allDay ? "date" : "datetime-local"}
             value={form.due}
             onChange={(e) => set("due", e.target.value)}
