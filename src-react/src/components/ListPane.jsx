@@ -8,6 +8,7 @@ import {
   priorityLabel,
   priorityMarks,
 } from "../format.js";
+import Composer from "./Composer.jsx";
 
 /** Views that span more than one day read better broken up by date. */
 const DATE_GROUPED = new Set(["upcoming", "all", "today"]);
@@ -90,7 +91,7 @@ const ListPane = forwardRef(function ListPane(
     title, rows, lists, scope, listId, globalSearch,
     search, setSearch, searchScope, onToggleSearchScope,
     showDone, setShowDone, sortBy, setSortBy,
-    selectedId, onSelect, onNew, onPrint, onToggleComplete, onRestore,
+    selectedId, onSelect, onNew, onQuickCreate, onPrint, onToggleComplete, onRestore,
     viewKey, leaving,
   },
   ref
@@ -98,16 +99,26 @@ const ListPane = forwardRef(function ListPane(
   const [searchOpen, setSearchOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
   const inputRef = useRef(null);
+  const composerRef = useRef(null);
 
   useImperativeHandle(ref, () => ({
     open() {
       setSearchOpen(true);
       requestAnimationFrame(() => inputRef.current?.focus());
     },
+    compose() {
+      composerRef.current?.focus();
+    },
   }));
 
   const inTrash = scope === "deleted";
   const showListChip = !listId || globalSearch;
+
+  // Nothing can be created into Deleted or Completed, and a composer sitting
+  // under a set of search results would create somewhere you cannot see.
+  const canCompose = !inTrash && scope !== "completed" && !search;
+  const composerHint =
+    scope === "today" ? "New reminder, due today" : "New reminder";
 
   // Date headings only make sense when the rows are actually in date order.
   const grouped = useMemo(() => {
@@ -260,15 +271,27 @@ const ListPane = forwardRef(function ListPane(
       </header>
 
       {rows.length === 0 ? (
-        <p className="empty">
-          {search
-            ? "No matches."
-            : inTrash
-            ? "Nothing deleted."
-            : scope === "completed"
-            ? "Nothing completed yet."
-            : "Nothing here."}
-        </p>
+        <div className="reminders-scroll" key={viewKey}>
+          <p className="empty">
+            {search
+              ? "No matches."
+              : inTrash
+              ? "Nothing deleted."
+              : scope === "completed"
+              ? "Nothing completed yet."
+              : "Nothing here."}
+          </p>
+          {canCompose && (
+            <ul className="reminders">
+              <Composer
+                ref={composerRef}
+                placeholder={composerHint}
+                onCreate={onQuickCreate}
+                onDetails={onNew}
+              />
+            </ul>
+          )}
+        </div>
       ) : (
         // Re-keyed per view: the rows are all replaced on a switch anyway, and
         // remounting here both replays the enter animation and puts the new
@@ -307,6 +330,18 @@ const ListPane = forwardRef(function ListPane(
               </ul>
             </section>
           ))}
+          {/* Last, so it sits where the reminder it creates will appear rather
+              than above everything the list already has. */}
+          {canCompose && (
+            <ul className="reminders">
+              <Composer
+                ref={composerRef}
+                placeholder={composerHint}
+                onCreate={onQuickCreate}
+                onDetails={onNew}
+              />
+            </ul>
+          )}
         </div>
       )}
     </main>

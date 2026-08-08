@@ -65,6 +65,9 @@ export default function App() {
   const [searchScope, setSearchScope] = useState("list");
   const [showDone, setShowDone] = useState(false);
   const [sheet, setSheet] = useState(null); // new | settings | print
+  // Carried from the inline composer into the full sheet, so pressing Details
+  // does not throw away what has already been typed.
+  const [newTitle, setNewTitle] = useState("");
   const [onboarding, setOnboarding] = useState(false);
   const [banner, setBanner] = useState(null);
   // Sticky, unlike `banner`. Set when the session dies while the app is open,
@@ -315,6 +318,31 @@ export default function App() {
     [loadRows, loadShell]
   );
 
+  // Typed straight into the list, so only a title exists. Everything else
+  // follows the view: the default list (or the one being looked at), and in
+  // Today a due date of today -- without which the reminder is created and
+  // immediately invisible, which reads as the app having lost it.
+  const quickCreate = useCallback(
+    (title) => {
+      const payload = {
+        list_id: settings.default_list_id || listId || lists.find((l) => !l.is_group)?.id,
+        title,
+      };
+      if (!payload.list_id) {
+        toast("No list to add to yet.", "warn");
+        return;
+      }
+      if (scope === "today" && !listId && !tag) {
+        const d = new Date();
+        const p = (n) => String(n).padStart(2, "0");
+        payload.due_date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+        payload.all_day = true;
+      }
+      mutate(() => call("create_reminder", payload));
+    },
+    [settings.default_list_id, listId, lists, scope, tag, mutate, toast]
+  );
+
   const selected = useMemo(
     () => rows.find((r) => r.id === selectedId) || null,
     [rows, selectedId]
@@ -363,7 +391,7 @@ export default function App() {
       if (phase !== "app") return;
       if (mod && ev.key.toLowerCase() === "n") {
         ev.preventDefault();
-        setSheet("new");
+        searchRef.current?.compose();
       } else if (mod && ev.key.toLowerCase() === "f") {
         ev.preventDefault();
         searchRef.current?.open();
@@ -375,7 +403,7 @@ export default function App() {
         setSheet("settings");
       } else if (ev.key === "n" && !typing && !sheet) {
         ev.preventDefault();
-        setSheet("new");
+        searchRef.current?.compose();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -440,7 +468,11 @@ export default function App() {
           setSortBy={setSortBy}
           selectedId={selectedId}
           onSelect={setSelectedId}
-          onNew={() => setSheet("new")}
+          onNew={(title) => {
+            setNewTitle(title || "");
+            setSheet("new");
+          }}
+          onQuickCreate={quickCreate}
           onPrint={() => setSheet("print")}
           viewKey={viewKey}
           leaving={leaving}
@@ -475,9 +507,16 @@ export default function App() {
         <NewReminderSheet
           lists={lists}
           defaultListId={settings.default_list_id || listId}
-          onClose={() => setSheet(null)}
+          initialTitle={newTitle}
+          onClose={() => {
+            setNewTitle("");
+            setSheet(null);
+          }}
           onCreate={(payload) =>
-            mutate(() => call("create_reminder", payload)).then(() => setSheet(null))
+            mutate(() => call("create_reminder", payload)).then(() => {
+              setNewTitle("");
+              setSheet(null);
+            })
           }
         />
       )}
