@@ -13,6 +13,7 @@ everywhere the rest of the suite does.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -110,22 +111,81 @@ def test_each_interface_paints_its_own_ground(sheets):
 
 def test_only_one_stylesheet_is_ever_attached():
     """
-    `?inline` is what makes the swap a swap: Vite hands the CSS over as a string
-    instead of injecting it, so attaching it is skin.js's decision. A plain
-    `import "./styles.css"` anywhere would leave that sheet live under the other
-    interface, and it would take a screenshot to notice.
+    `?url` is what makes the swap a swap: Vite emits each sheet as its own
+    asset and hands over the URL instead of injecting the CSS, so attaching one
+    is skin.js's decision. A plain `import "./styles.css"` anywhere would leave
+    that sheet live under the other interface, and it would take a screenshot
+    to notice.
     """
     skin = (SRC / "skin.js").read_text(encoding="utf-8")
-    assert 'from "./styles.css?inline"' in skin
-    assert 'from "./winui.css?inline"' in skin
+    assert 'from "./styles.css?url"' in skin
+    assert 'from "./winui.css?url"' in skin
 
     for path in SRC.rglob("*.js*"):
         text = path.read_text(encoding="utf-8")
         for hit in re.findall(r'import\s+[^;\n]*["\']([^"\']+\.css)["\']', text):
-            assert hit.endswith("?inline"), (
+            assert hit.endswith("?url"), (
                 f"{path.relative_to(ROOT)} imports {hit} for its side effect; "
                 "that sheet is then live whichever interface is selected"
             )
+
+
+def test_the_skin_is_attached_as_a_link_not_an_injected_style():
+    """
+    The one failure this arrangement invites that no amount of rendering will
+    catch.
+
+    Tauri appends its own nonces to `style-src` when it compiles the CSP, and a
+    directive carrying a nonce makes `'unsafe-inline'` inert for style
+    *elements*. So a <style> built at runtime is dropped and the entire app
+    renders with no CSS at all -- while inline style attributes, scripts and
+    everything else keep working, because a nonce does not apply to attributes.
+
+    It cannot be reproduced outside the packaged app: dist/ loaded in a browser
+    has no CSP, so the screenshots look perfect. This shipped exactly once.
+    A <link> at a same-origin URL needs only `style-src 'self'`.
+    """
+    skin = (SRC / "skin.js").read_text(encoding="utf-8")
+    assert 'createElement("link")' in skin, "the skin must be attached as a <link>"
+    assert 'createElement("style")' not in skin, (
+        "an injected <style> is blocked by the CSP Tauri compiles, and fails "
+        "silently -- the whole app renders unstyled"
+    )
+    assert "?inline" not in skin, (
+        "?inline means the CSS arrives as a string with nowhere to go but a "
+        "<style> element, which the CSP drops"
+    )
+
+
+def test_the_csp_still_allows_style_attributes():
+    """
+    Tauri's nonce kills `'unsafe-inline'` for style elements but not for style
+    attributes, and the UI sets plenty of those -- a list's colour, the sync
+    bar's width, a menu's measured position. Dropping `'unsafe-inline'` as
+    "ineffective anyway" would take all of those with it.
+    """
+    csp = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text())
+    csp = csp["app"]["security"]["csp"]
+    style = [d for d in csp.split(";") if d.strip().startswith("style-src")]
+    assert style, "no style-src directive"
+    assert "'unsafe-inline'" in style[0], (
+        "React writes style attributes throughout; without this they are blocked"
+    )
+    assert "'self'" in style[0], "the skin stylesheets are same-origin <link>s"
+
+
+def test_both_stylesheets_reach_the_build_as_separate_assets():
+    """
+    `?url` emitting a real file is the whole mechanism. If a Vite change ever
+    turned it back into an inlined string, the build would still succeed and
+    the app would still work in a browser.
+    """
+    dist = ROOT / "dist" / "assets"
+    if not dist.is_dir():
+        pytest.skip("dist/ not built")
+    names = [p.name for p in dist.glob("*.css")]
+    assert any(n.startswith("styles-") for n in names), names
+    assert any(n.startswith("winui-") for n in names), names
 
 
 def test_the_interface_choice_survives_a_restart():

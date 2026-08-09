@@ -328,9 +328,16 @@ something to save.
 So the sidebar, the list and the detail pane are separate components per
 interface, and each has its own complete stylesheet. Exactly one of the two is
 attached to the document at a time — `src-react/src/skin.js` imports both with
-Vite's `?inline`, which hands the CSS over as a string instead of injecting it,
-and swaps the contents of a single `<style>` tag. Nothing cascades from the
-interface you are not in.
+Vite's `?url`, which emits each as its own asset, and swaps a single `<link>`
+between them. Nothing cascades from the interface you are not in.
+
+It has to be a `<link>`, not a `<style>` holding the text. Tauri appends its own
+nonces to `style-src` when it compiles the CSP, and a directive carrying a nonce
+makes `'unsafe-inline'` inert for style *elements* — so an injected `<style>` is
+dropped and the app renders with no CSS at all, while inline style attributes
+and everything else keep working. None of that reproduces outside the packaged
+app, because `dist/` in a browser has no CSP; it shipped once and is now pinned
+by a test.
 
 What they do share is everything modal — sign-in, the dialogs, onboarding, the
 notices, the print view — and the composer, because the *gesture* of creating a
@@ -507,7 +514,7 @@ pip install ./sidecar pytest
 cd sidecar; python -m pytest
 ```
 
-169 tests, aimed at the things that are hard to check by looking:
+172 tests, aimed at the things that are hard to check by looking:
 
 - wall-clock and timezone conversion, including the all-day case
 - cache filtering, ordering and the Completed cap
@@ -517,7 +524,9 @@ cd sidecar; python -m pytest
 - the icon set — every Windows shell size present, the small art still legible,
   the CSP still allowing the inline script
 - the two interfaces — that neither stylesheet depends on the other, that both
-  style every shared component, and that only one is ever attached
+  style every shared component, that only one is ever attached, and that it is
+  attached as a `<link>` rather than an injected `<style>`, which the app's own
+  CSP silently drops
 - this README — that its links resolve and its numbers are current
 
 They run on Linux and macOS as well as Windows, and nothing in the suite needs
