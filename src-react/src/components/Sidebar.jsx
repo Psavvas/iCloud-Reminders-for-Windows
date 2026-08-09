@@ -1,6 +1,12 @@
 import { useEffect, useRef } from "react";
 import SyncBar from "./SyncBar.jsx";
-import { GroupIcon, ListIcon, SMART_ICONS } from "./icons.jsx";
+import {
+  GroupIcon,
+  ListIcon,
+  SMART_ICONS,
+  SettingsIcon,
+  SyncIcon,
+} from "./icons.jsx";
 
 export default function Sidebar({
   smart, counts, lists, tags, scope, listId, tag,
@@ -35,10 +41,10 @@ export default function Sidebar({
             title="Sync now"
             onClick={onSync}
           >
-            ⟳
+            <SyncIcon />
           </button>
           <button className="icon-btn" title="Settings (Ctrl+,)" onClick={onSettings}>
-            ⚙
+            <SettingsIcon />
           </button>
         </div>
       </div>

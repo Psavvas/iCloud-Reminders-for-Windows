@@ -34,6 +34,7 @@ out to be a wall, it is documented as a wall rather than worked around.
 
 | | |
 |---|---|
+| Two interfaces | Apple's, or native Fluent — picked in Settings |
 | Lists, reminders, detail pane | Read and write |
 | Title, notes, due date, priority | Read and write |
 | Smart lists | Today, Upcoming, All, Completed, Deleted |
@@ -76,12 +77,28 @@ attachments, location triggers, sharing, and natural-language date entry.
 <td><b>Dark theme</b>, following Windows or forced in Settings</td>
 </tr>
 <tr>
-<td><img src="docs/screenshots/07-new-reminder.png" alt="The new reminder sheet"></td>
-<td><img src="docs/screenshots/13-print-options.png" alt="Print options: grouping, notes, completed items"></td>
+<td><img src="docs/screenshots/07-new-reminder.png" alt="A reminder being typed in place, with a date already chosen"></td>
+<td><img src="docs/screenshots/20-composer-dates.png" alt="The date menu: None, Today, Tomorrow, Next Weekend, Next Week, Custom"></td>
 </tr>
 <tr>
-<td><b>New reminder</b> as a sheet, not a permanently open field</td>
+<td><b>New reminders</b> are typed where they will appear, not in a dialog</td>
+<td><b>A date</b> is one press away, and each preset shows the day it lands on</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/21-winui-light.png" alt="The same app in the Fluent interface"></td>
+<td><img src="docs/screenshots/22-winui-dark.png" alt="The Fluent interface in dark theme"></td>
+</tr>
+<tr>
+<td><b>The Windows interface</b> — a NavigationView, a command bar, Fluent controls</td>
+<td><b>The same, dark.</b> Both interfaces follow the theme independently</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/13-print-options.png" alt="Print options: grouping, notes, completed items"></td>
+<td><img src="docs/screenshots/23-winui-composer.png" alt="The composer in the Fluent interface"></td>
+</tr>
+<tr>
 <td><b>Printing</b> any view, grouped, with tick boxes</td>
+<td><b>The same gesture</b> in the other interface, drawn the Windows way</td>
 </tr>
 </table>
 
@@ -280,6 +297,73 @@ items are optional. `break-inside: avoid` keeps a reminder off a page boundary.
 </details>
 
 <details>
+<summary><b>Two interfaces</b> — not one with a theme switch</summary>
+
+<br>
+
+An iCloud client is expected to look like Apple's. An app on your Windows
+taskbar is expected to look like Windows'. Those are not the same brief, so the
+app ships both and **Settings → Appearance → Interface** picks one.
+
+They are separate interfaces rather than a palette swap, because a palette swap
+would not get either one right. Fluent disagrees with Apple about more than
+colour: 4px corners on controls and 8px on surfaces against Apple's four radii,
+a 32px control height, selection marked by a 3px bar at a row's leading edge
+instead of a tint across the whole row, commands that carry names rather than
+being bare glyphs, search that is always on screen rather than folded behind a
+magnifier, toggles at 40×20 rather than 42×25, and a detail pane built from
+bordered settings cards rather than an inset group of borderless fields.
+
+So the sidebar, the list and the detail pane are separate components per
+interface, and each has its own complete stylesheet. Exactly one of the two is
+attached to the document at a time — `src-react/src/skin.js` imports both with
+Vite's `?inline`, which hands the CSS over as a string instead of injecting it,
+and swaps the contents of a single `<style>` tag. Nothing cascades from the
+interface you are not in.
+
+What they do share is everything modal — sign-in, the dialogs, onboarding, the
+notices, the print view — and the composer, because the *gesture* of creating a
+reminder should not change with the paint. Those are styled twice, once in each
+sheet, and a test checks that neither sheet has dropped a class the other still
+renders. That is the failure this arrangement invites: a shared component
+styled in one interface only, which looks fine to whoever changed it and
+unstyled to half the users.
+
+</details>
+
+<details>
+<summary><b>Creating a reminder</b> — the row you type in is the reminder</summary>
+
+<br>
+
+There is no "new reminder" dialog in the normal path. Clicking the empty row at
+the bottom of the list lifts it into a card in place, with a title, a note, and
+a row of quick actions: date, time, priority, list. Nothing moves — the text
+stays exactly where the finished reminder will be.
+
+A quick action with nothing set is a plain circle. Setting one turns it into a
+filled pill stating the value, so the card reads back what it is about to
+create without a summary line underneath it. The date menu offers Today,
+Tomorrow, Next Weekend and Next Week, each drawn as a calendar showing the day
+it actually lands on — next weekend is the coming Saturday and next week the
+coming Monday, both strictly ahead, so neither can ever resolve to today. Time
+only appears once there is a day to hang it on. A date with no time is stored
+all-day, the way Apple stores it, rather than as midnight.
+
+Enter commits and leaves the card open with the caret back in the title, so
+three reminders are one gesture rather than three trips through a dialog. The
+list it files into is the one thing kept between them. Clicking away commits
+too — text typed into a list has already been written down as far as anyone is
+concerned — and Escape discards. The ⓘ button hands the whole draft to the full
+sheet rather than starting over from an empty form.
+
+**There is no tag button**, unlike Apple's. Tags cannot be written through this
+API at all, and a control that quietly does nothing is worse than one that is
+not there. A test asserts the composer never grows one.
+
+</details>
+
+<details>
 <summary><b>Look and feel</b> — icons, motion, scrollbars, first paint</summary>
 
 <br>
@@ -301,11 +385,12 @@ items are optional. `break-inside: avoid` keeps a reminder off a page boundary.
 - **Scrollbars** are styled, because WebView2 otherwise draws the stock Windows
   scrollbar inside an app that is Apple everywhere else.
 - **First paint** carries the theme background inline in `index.html`, ahead of
-  the bundle, so a dark-theme launch does not start with a white flash. That
-  inline script is allow-listed in the CSP by hash rather than by
-  `'unsafe-inline'`, and a test recomputes the hash from both the source and the
-  built copy — a blocked inline script fails silently, so the flash would just
-  quietly return.
+  the bundle, so a dark-theme launch does not start with a white flash. It
+  carries the interface's ground colour too, since Apple white and Fluent grey
+  are different flashes to avoid. That inline script is allow-listed in the CSP
+  by hash rather than by `'unsafe-inline'`, and a test recomputes the hash from
+  both the source and the built copy — a blocked inline script fails silently,
+  so the flash would just quietly return.
 - Everything collapses under `prefers-reduced-motion`.
 
 </details>
@@ -411,7 +496,7 @@ pip install ./sidecar pytest
 cd sidecar; python -m pytest
 ```
 
-161 tests, aimed at the things that are hard to check by looking:
+169 tests, aimed at the things that are hard to check by looking:
 
 - wall-clock and timezone conversion, including the all-day case
 - cache filtering, ordering and the Completed cap
@@ -420,6 +505,8 @@ cd sidecar; python -m pytest
 - sleep/wake notification batching
 - the icon set — every Windows shell size present, the small art still legible,
   the CSP still allowing the inline script
+- the two interfaces — that neither stylesheet depends on the other, that both
+  style every shared component, and that only one is ever attached
 - this README — that its links resolve and its numbers are current
 
 They run on Linux and macOS as well as Windows, and nothing in the suite needs
@@ -438,6 +525,12 @@ sidecar/        Python: iCloud client, SQLite cache, sync, notification policy
     server.py       JSON-RPC over stdio
 src-tauri/      Rust: window, tray, timers, sidecar supervision
 src-react/      React UI, built by Vite into dist/
+  src/
+    skin.js         which interface is live, and the stylesheet swap
+    styles.css      the Apple interface, whole
+    winui.css       the Fluent interface, whole
+    components/     shared, plus the Apple sidebar/list/detail
+      winui/        the Fluent sidebar/list/detail
 scripts/        Icon generation, sidecar freeze, build and account checks
 tools/          Screenshot and print-layout tooling
 spike/          Phase 1 validation scripts and findings

@@ -9,6 +9,7 @@ import {
   priorityMarks,
 } from "../format.js";
 import Composer from "./Composer.jsx";
+import { RestoreIcon } from "./icons.jsx";
 
 /** Views that span more than one day read better broken up by date. */
 const DATE_GROUPED = new Set(["upcoming", "all", "today"]);
@@ -36,7 +37,7 @@ function Row({
             onRestore(r);
           }}
         >
-          ↺
+          <RestoreIcon />
         </button>
       ) : (
         <input
@@ -88,7 +89,7 @@ function Row({
 
 const ListPane = forwardRef(function ListPane(
   {
-    title, rows, lists, scope, listId, globalSearch,
+    title, rows, lists, scope, listId, globalSearch, defaultListId,
     search, setSearch, searchScope, onToggleSearchScope,
     showDone, setShowDone, sortBy, setSortBy,
     selectedId, onSelect, onNew, onQuickCreate, onPrint, onToggleComplete, onRestore,
@@ -118,7 +119,20 @@ const ListPane = forwardRef(function ListPane(
   // under a set of search results would create somewhere you cannot see.
   const canCompose = !inTrash && scope !== "completed" && !search;
   const composerHint =
-    scope === "today" ? "New reminder, due today" : "New reminder";
+    scope === "today" ? "New Reminder, due today" : "New Reminder";
+
+  const composer = canCompose ? (
+    <ul className="reminders">
+      <Composer
+        ref={composerRef}
+        placeholder={composerHint}
+        lists={lists}
+        defaultListId={defaultListId}
+        onCreate={onQuickCreate}
+        onDetails={onNew}
+      />
+    </ul>
+  ) : null;
 
   // Date headings only make sense when the rows are actually in date order.
   const grouped = useMemo(() => {
@@ -149,7 +163,7 @@ const ListPane = forwardRef(function ListPane(
           <div className="head-actions">
             <div className={`search-wrap${searchOpen ? " open" : ""}`}>
               <button
-                className="icon-btn round"
+                className="icon-btn round search-toggle"
                 title="Search (Ctrl+F)"
                 onClick={() => {
                   setSearchOpen(true);
@@ -241,7 +255,16 @@ const ListPane = forwardRef(function ListPane(
               </svg>
             </button>
 
-            <button className="add-btn" title="New reminder (Ctrl+N)" onClick={onNew}>
+            {/* Wrapped, not passed straight through: onNew takes the draft the
+                composer hands it, and a bare handler would pass the click
+                event as the new reminder's title. */}
+            <button
+              className="add-btn"
+              title="New reminder (Ctrl+N)"
+              onClick={() =>
+                canCompose ? composerRef.current?.focus() : onNew(null)
+              }
+            >
               +
             </button>
           </div>
@@ -281,16 +304,7 @@ const ListPane = forwardRef(function ListPane(
               ? "Nothing completed yet."
               : "Nothing here."}
           </p>
-          {canCompose && (
-            <ul className="reminders">
-              <Composer
-                ref={composerRef}
-                placeholder={composerHint}
-                onCreate={onQuickCreate}
-                onDetails={onNew}
-              />
-            </ul>
-          )}
+          {composer}
         </div>
       ) : (
         // Re-keyed per view: the rows are all replaced on a switch anyway, and
@@ -332,16 +346,7 @@ const ListPane = forwardRef(function ListPane(
           ))}
           {/* Last, so it sits where the reminder it creates will appear rather
               than above everything the list already has. */}
-          {canCompose && (
-            <ul className="reminders">
-              <Composer
-                ref={composerRef}
-                placeholder={composerHint}
-                onCreate={onQuickCreate}
-                onDetails={onNew}
-              />
-            </ul>
-          )}
+          {composer}
         </div>
       )}
     </main>

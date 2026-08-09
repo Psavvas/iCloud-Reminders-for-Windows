@@ -77,7 +77,7 @@
   ];
 
   const settings = {
-    theme: "system", sync_minutes: 10, notifications_enabled: true,
+    theme: "system", ui_style: "apple", sync_minutes: 10, notifications_enabled: true,
     stale_after_minutes: 60, max_individual_toasts: 3,
     default_list_id: null, search_scope: "list",
     onboarded: true, print_group_by: "due", sort_by: {},
@@ -96,8 +96,15 @@
       restoring: !!window.__MOCK_RESTORING,
       can_restore: !!window.__MOCK_RESTORING,
     }),
-    settings: () => ({ ...settings, onboarded: !window.__MOCK_ONBOARD }),
-    set_settings: (p) => Object.assign(settings, p),
+    settings: () => ({
+      ...settings,
+      onboarded: !window.__MOCK_ONBOARD,
+      ui_style: window.__MOCK_WINUI ? "winui" : settings.ui_style,
+    }),
+    // A fresh object each time, as the sidecar sends. Returning the same one
+    // twice makes React's setState bail out on identity, so the second change
+    // to any setting appeared to do nothing at all.
+    set_settings: (p) => ({ ...Object.assign(settings, p) }),
     smart_counts: () => {
       const t = startOfTomorrow();
       const live = REMINDERS.filter((r) => !r.deleted);

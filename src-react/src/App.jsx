@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { call, invoke, listen, parseError } from "./bridge.js";
+import { applyUiStyle, normalizeUi } from "./skin.js";
 import Gate from "./components/Gate.jsx";
-import Sidebar from "./components/Sidebar.jsx";
-import ListPane from "./components/ListPane.jsx";
-import Detail from "./components/Detail.jsx";
+import AppleSidebar from "./components/Sidebar.jsx";
+import AppleListPane from "./components/ListPane.jsx";
+import AppleDetail from "./components/Detail.jsx";
+import WinSidebar from "./components/winui/Sidebar.jsx";
+import WinListPane from "./components/winui/ListPane.jsx";
+import WinDetail from "./components/winui/Detail.jsx";
 import NewReminderSheet from "./components/NewReminderSheet.jsx";
 import SettingsSheet from "./components/SettingsSheet.jsx";
 import PrintSheet from "./components/PrintSheet.jsx";
@@ -65,9 +69,9 @@ export default function App() {
   const [searchScope, setSearchScope] = useState("list");
   const [showDone, setShowDone] = useState(false);
   const [sheet, setSheet] = useState(null); // new | settings | print
-  // Carried from the inline composer into the full sheet, so pressing Details
-  // does not throw away what has already been typed.
-  const [newTitle, setNewTitle] = useState("");
+  // Carried from the inline composer into the full sheet, so pressing the
+  // details button does not throw away what has already been typed or picked.
+  const [newDraft, setNewDraft] = useState(null);
   const [onboarding, setOnboarding] = useState(false);
   const [banner, setBanner] = useState(null);
   // Sticky, unlike `banner`. Set when the session dies while the app is open,
@@ -158,6 +162,7 @@ export default function App() {
         cfg = await call("settings");
         setSettings(cfg);
         applyTheme(cfg.theme);
+        applyUiStyle(cfg.ui_style);
         setSearchScope(cfg.search_scope || "list");
       } catch {
         /* defaults are fine */
@@ -318,29 +323,44 @@ export default function App() {
     [loadRows, loadShell]
   );
 
-  // Typed straight into the list, so only a title exists. Everything else
-  // follows the view: the default list (or the one being looked at), and in
-  // Today a due date of today -- without which the reminder is created and
-  // immediately invisible, which reads as the app having lost it.
+  const usableLists = useMemo(() => lists.filter((l) => !l.is_group), [lists]);
+
+  /**
+   * Where a new reminder lands unless the composer is told otherwise.
+   *
+   * The list being looked at wins over the configured default: typing into
+   * Groceries and having it appear in Inbox is the kind of surprise that costs
+   * more than the setting saves. Groups hold lists rather than reminders, so
+   * one selected in the sidebar is not a candidate.
+   */
+  const composerListId = useMemo(() => {
+    const has = (id) => id && usableLists.some((l) => l.id === id);
+    if (has(listId)) return listId;
+    if (has(settings.default_list_id)) return settings.default_list_id;
+    const inbox = usableLists.find((l) => (l.title || "").toLowerCase() === "inbox");
+    return (inbox || usableLists[0] || {}).id || "";
+  }, [listId, settings.default_list_id, usableLists]);
+
+  // Built by the composer, which already knows the list, date, time and
+  // priority. The one thing left to the view is Today: a reminder created
+  // there with no date of its own is created and immediately invisible, which
+  // reads as the app having lost it.
   const quickCreate = useCallback(
-    (title) => {
-      const payload = {
-        list_id: settings.default_list_id || listId || lists.find((l) => !l.is_group)?.id,
-        title,
-      };
-      if (!payload.list_id) {
+    (payload) => {
+      const p = { ...payload, list_id: payload.list_id || composerListId };
+      if (!p.list_id) {
         toast("No list to add to yet.", "warn");
         return;
       }
-      if (scope === "today" && !listId && !tag) {
+      if (!p.due_date && scope === "today" && !listId && !tag) {
         const d = new Date();
-        const p = (n) => String(n).padStart(2, "0");
-        payload.due_date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-        payload.all_day = true;
+        const pad = (n) => String(n).padStart(2, "0");
+        p.due_date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        p.all_day = true;
       }
-      mutate(() => call("create_reminder", payload));
+      mutate(() => call("create_reminder", p));
     },
-    [settings.default_list_id, listId, lists, scope, tag, mutate, toast]
+    [composerListId, listId, scope, tag, mutate, toast]
   );
 
   const selected = useMemo(
@@ -411,6 +431,15 @@ export default function App() {
   }, [phase, sheet]);
 
   // ------------------------------------------------------------------ render
+  //
+  // Two interfaces, not one interface with a theme. The panes below are picked
+  // as whole components and the stylesheet is swapped wholesale in skin.js, so
+  // neither skin can inherit a rule or a bit of markup from the other.
+  const ui = normalizeUi(settings.ui_style);
+  const Sidebar = ui === "winui" ? WinSidebar : AppleSidebar;
+  const ListPane = ui === "winui" ? WinListPane : AppleListPane;
+  const Detail = ui === "winui" ? WinDetail : AppleDetail;
+
   if (phase !== "app") {
     return (
       <Gate
@@ -427,7 +456,7 @@ export default function App() {
 
   return (
     <>
-      <div className="app">
+      <div className="app" data-ui={ui}>
         <Sidebar
           smart={SMART}
           counts={counts}
@@ -454,6 +483,7 @@ export default function App() {
           scope={scope}
           listId={listId}
           globalSearch={globalSearch}
+          defaultListId={composerListId}
           search={search}
           setSearch={setSearch}
           searchScope={searchScope}
@@ -468,8 +498,8 @@ export default function App() {
           setSortBy={setSortBy}
           selectedId={selectedId}
           onSelect={setSelectedId}
-          onNew={(title) => {
-            setNewTitle(title || "");
+          onNew={(draft) => {
+            setNewDraft(draft || null);
             setSheet("new");
           }}
           onQuickCreate={quickCreate}
@@ -505,16 +535,16 @@ export default function App() {
 
       {sheet === "new" && (
         <NewReminderSheet
-          lists={lists}
-          defaultListId={settings.default_list_id || listId}
-          initialTitle={newTitle}
+          lists={usableLists}
+          defaultListId={composerListId}
+          initialDraft={newDraft}
           onClose={() => {
-            setNewTitle("");
+            setNewDraft(null);
             setSheet(null);
           }}
           onCreate={(payload) =>
             mutate(() => call("create_reminder", payload)).then(() => {
-              setNewTitle("");
+              setNewDraft(null);
               setSheet(null);
             })
           }
@@ -546,6 +576,7 @@ export default function App() {
             setGateStep("login");
           }}
           onThemeChange={applyTheme}
+          onUiStyleChange={applyUiStyle}
         />
       )}
 

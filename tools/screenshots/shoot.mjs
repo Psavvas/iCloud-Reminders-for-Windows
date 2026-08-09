@@ -99,9 +99,11 @@ async function shoot(
   await ctx.close();
 }
 
+// `.row` in the Apple sidebar, `.nav-item` in the Fluent one -- the two panes
+// are separate components and share no class names.
 const clickRow = async (page, text) => {
   await page.evaluate((t) => {
-    const r = [...document.querySelectorAll(".row")].find((x) =>
+    const r = [...document.querySelectorAll(".row, .nav-item")].find((x) =>
       x.textContent.includes(t)
     );
     if (r) r.click();
@@ -147,14 +149,38 @@ await shoot("04-conflict", {
   },
 });
 
-await shoot("07-new-reminder", {
+// The composer, as it looks once it has lifted into a card and been given a
+// date. This is the app's main way of creating a reminder, so it is the shot
+// that has to stay honest.
+const composeInPlace = async (page) => {
+  await selectInbox(page);
+  await page.click(".add-btn, .win-cmd");
+  await page.waitForTimeout(300);
+  await page.fill(".cc-title", "Order lab safety goggles");
+  await page.fill(".cc-note", "Needed before Thursday's titration.");
+  await page.click('.tool[aria-label="Due date"]');
+  await page.waitForTimeout(250);
+  await page.evaluate(() => {
+    const item = [...document.querySelectorAll(".composer-menu .menu-item")].find(
+      (b) => b.textContent.includes("Tomorrow")
+    );
+    if (item) item.click();
+  });
+  await page.waitForTimeout(300);
+};
+
+await shoot("07-new-reminder", { prep: composeInPlace });
+
+// The date menu open, which is the part of the gesture a still frame otherwise
+// cannot show.
+await shoot("20-composer-dates", {
   prep: async (page) => {
     await selectInbox(page);
     await page.click(".add-btn");
-    await page.waitForTimeout(350);
-    await page.fill("#n-title", "Order lab safety goggles");
-    await page.fill("#n-notes", "Needed before Thursday's titration.");
-    await page.selectOption("#n-prio", "5");
+    await page.waitForTimeout(300);
+    await page.fill(".cc-title", "Order lab safety goggles");
+    await page.click('.tool[aria-label="Due date"]');
+    await page.waitForTimeout(300);
   },
 });
 
@@ -251,6 +277,45 @@ await shoot("18-restoring", {
   height: 620,
   flags: { __MOCK_RESTORING: true },
   prep: (page) => page.waitForSelector(".gate-step", { timeout: 10000 }),
+});
+
+// --------------------------------------------------------- the other interface
+//
+// Everything above is the Apple interface. These four are the Fluent one, and
+// exist because the two share no stylesheet: a change that looks right in one
+// says nothing at all about the other.
+
+const winui = { __MOCK_WINUI: true };
+
+await shoot("21-winui-light", {
+  flags: winui,
+  prep: async (page) => {
+    await selectInbox(page);
+    await page.evaluate(() => {
+      const r = [...document.querySelectorAll(".win-row")].find((x) =>
+        x.textContent.includes("KIPR")
+      );
+      if (r) r.click();
+    });
+    await page.waitForTimeout(400);
+  },
+});
+
+await shoot("22-winui-dark", {
+  dark: true,
+  flags: winui,
+  prep: (p) => clickRow(p, "Upcoming"),
+});
+
+await shoot("23-winui-composer", { flags: winui, prep: composeInPlace });
+
+await shoot("24-winui-settings", {
+  flags: winui,
+  prep: async (page) => {
+    await selectInbox(page);
+    await page.click('.nav-item[title^="Settings"]');
+    await page.waitForTimeout(350);
+  },
 });
 
 await shoot("05-signin", {

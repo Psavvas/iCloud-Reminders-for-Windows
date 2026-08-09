@@ -2,28 +2,37 @@ import { useEffect, useRef, useState } from "react";
 import Sheet from "./Sheet.jsx";
 import { PRIORITIES, reshapeDue } from "../format.js";
 
+/**
+ * Everything the inline composer does not cover, on the rare occasion it is
+ * wanted -- and the landing place for the composer's details button, which
+ * hands over whatever has already been typed and picked rather than starting
+ * a second time from an empty form.
+ */
 export default function NewReminderSheet({
-  lists, defaultListId, initialTitle = "", onClose, onCreate,
+  lists, defaultListId, initialDraft, onClose, onCreate,
 }) {
   const usable = lists.filter((l) => !l.is_group);
   const fallback =
     defaultListId ||
     (usable.find((l) => (l.title || "").toLowerCase() === "inbox") || usable[0] || {}).id;
 
+  const draft = initialDraft || {};
   const [form, setForm] = useState({
-    title: initialTitle,
-    notes: "",
-    listId: fallback || "",
-    priority: "0",
-    due: "",
-    allDay: false,
+    title: draft.title || "",
+    notes: draft.note || "",
+    listId: draft.listId || fallback || "",
+    priority: String(Number(draft.priority) || 0),
+    // The composer keeps date and time apart -- a date with no time is what
+    // makes a reminder all-day. Here they are one field, so they join up.
+    due: draft.date ? (draft.time ? `${draft.date}T${draft.time}` : draft.date) : "",
+    allDay: Boolean(draft.date) && !draft.time,
   });
   const titleRef = useRef(null);
   const dueRef = useRef(null);
   // With a title already carried in from the composer, putting the caret back
-  // on it means retyping past it; the point of Details is the rest.
+  // on it means retyping past it; the point of coming here is the rest.
   useEffect(() => {
-    if (initialTitle) dueRef.current?.focus();
+    if (form.title) dueRef.current?.focus();
     else titleRef.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

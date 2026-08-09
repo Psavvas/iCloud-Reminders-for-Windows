@@ -16,16 +16,26 @@
     @media (prefers-color-scheme: dark) {
       :root:not([data-theme="light"]) { background: #1c1c1e; }
     }
+    /* The Fluent interface sits on a different ground colour, so the flash it
+       is avoiding is a different one. Same three cases, its own two values. */
+    :root[data-ui="winui"] { background: #f3f3f3; }
+    :root[data-ui="winui"][data-theme="dark"] { background: #202020; }
+    @media (prefers-color-scheme: dark) {
+      :root[data-ui="winui"]:not([data-theme="light"]) { background: #202020; }
+    }
   </style>
   <!--
-    The theme override lives in the sidecar's settings, which takes a round trip
-    to read. A copy in localStorage is readable now, so someone who chose Dark
-    on a light Windows does not get a white flash on every launch.
+    The theme and the interface style both live in the sidecar's settings, which
+    takes a round trip to read. A copy of each in localStorage is readable now,
+    so someone who chose Dark on a light Windows does not get a white flash on
+    every launch -- nor an Apple-white one on the way into the Fluent interface.
   -->
   <script>
     try {
+      var root = document.documentElement;
       var t = localStorage.getItem("theme");
-      if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      if (t === "light" || t === "dark") root.dataset.theme = t;
+      if (localStorage.getItem("ui_style") === "winui") root.dataset.ui = "winui";
     } catch (e) { /* private mode, or storage disabled */ }
   </script>
 </head>

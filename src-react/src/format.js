@@ -82,6 +82,72 @@ export const PRIORITIES = [
   { value: 9, label: "Low" },
 ];
 
+/* ------------------------------------------------------- quick date picking */
+
+/** "2026-08-09" for a Date, in the local zone rather than UTC. */
+export function ymd(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** The next `weekday` strictly after `from` -- never `from` itself. */
+function nextWeekday(from, weekday) {
+  const d = new Date(from);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + (((weekday - d.getDay() + 7) % 7) || 7));
+  return d;
+}
+
+/**
+ * The four presets Apple's own quick menu offers, with the day number each one
+ * lands on -- which is the whole point of showing a calendar glyph rather than
+ * a generic one. "Next weekend" is the coming Saturday and "next week" the
+ * coming Monday, both strictly ahead, so neither can ever resolve to today.
+ */
+export function datePresets(now = new Date()) {
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  return [
+    { key: "today", label: "Today", date: today },
+    { key: "tomorrow", label: "Tomorrow", date: tomorrow },
+    { key: "weekend", label: "Next Weekend", date: nextWeekday(today, 6) },
+    { key: "week", label: "Next Week", date: nextWeekday(today, 1) },
+  ].map((p) => ({ ...p, value: ymd(p.date), day: p.date.getDate() }));
+}
+
+/**
+ * How a chosen date reads on the button once it is set: the preset's own word
+ * where one matches, otherwise a real date. Apple shows "Tomorrow" rather than
+ * "10 Aug" for as long as that stays true, and re-resolves it the next day.
+ */
+export function dueLabel(value, now = new Date()) {
+  if (!value) return "";
+  const hit = datePresets(now).find((p) => p.value === value);
+  if (hit && hit.key !== "weekend" && hit.key !== "week") return hit.label;
+  const [y, m, d] = value.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  return date.toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: date.getFullYear() === now.getFullYear() ? undefined : "numeric",
+  });
+}
+
+/** Common times, offered before the picker -- most reminders want one of them. */
+export const TIME_PRESETS = ["09:00", "12:00", "17:00", "20:00"];
+
+/** "17:00" in whatever form the user's locale writes five in the afternoon. */
+export function formatClock(hhmm) {
+  if (!hhmm) return "";
+  const [h, m] = hhmm.split(":").map(Number);
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
 export const priorityLabel = (p) =>
   (PRIORITIES.find((x) => x.value === Number(p)) || PRIORITIES[0]).label;
 

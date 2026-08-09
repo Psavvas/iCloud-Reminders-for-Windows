@@ -531,6 +531,9 @@ class Cache:
         """User preferences, with defaults filled in for anything unset."""
         defaults = {
             "theme": "system",              # system | light | dark
+            # Which of the two interfaces is drawn. Not a theme: the two have
+            # separate stylesheets and separate components for the panes.
+            "ui_style": "apple",            # apple | winui
             "sync_minutes": 10,
             "notifications_enabled": True,
             "stale_after_minutes": 60,

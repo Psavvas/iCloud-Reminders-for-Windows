@@ -119,3 +119,131 @@ export const SMART_ICONS = {
   completed: CompletedIcon,
   deleted: DeletedIcon,
 };
+
+/* --------------------------------------------------------- composer glyphs */
+/*
+ * The quick-action row under a reminder being typed. Both interfaces use these
+ * same drawings: what separates the two skins is the shape and colour of the
+ * button around them, not the symbol inside it. Drawn on the same 24-unit grid
+ * as everything above, at a lighter weight -- these sit at 16px on a plain
+ * surface rather than 15px white-on-colour.
+ */
+
+const line = {
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.7,
+  strokeLinecap: "round",
+  strokeLinejoin: "round",
+  "aria-hidden": true,
+};
+
+/** A calendar, optionally showing the day it would set -- as Apple's menu does. */
+export function CalendarIcon({ day }) {
+  return (
+    <svg {...line}>
+      <rect x="3.2" y="5.2" width="17.6" height="15.6" rx="3.2" />
+      <path d="M3.2 9.8h17.6M8 3.2v3.6M16 3.2v3.6" />
+      {day != null && (
+        <text
+          x="12"
+          y="17.6"
+          textAnchor="middle"
+          fontSize="7.4"
+          fontWeight="700"
+          fill="currentColor"
+          stroke="none"
+          letterSpacing="0"
+        >
+          {day}
+        </text>
+      )}
+    </svg>
+  );
+}
+
+export function ClockIcon() {
+  return (
+    <svg {...line}>
+      <circle cx="12" cy="12" r="8.6" />
+      <path d="M12 7.2V12l3.2 2" />
+    </svg>
+  );
+}
+
+/** Priority. A flag rather than exclamation marks -- marks need a value to read. */
+export function FlagIcon() {
+  return (
+    <svg {...line}>
+      <path d="M6 21V4.4" />
+      <path d="M6 5.1h9.8l-1.8 3.4 1.8 3.4H6" />
+    </svg>
+  );
+}
+
+/** Which list it lands in. */
+export function ListsIcon() {
+  return (
+    <svg {...line}>
+      <path d="M9 6.6h11M9 12h11M9 17.4h11" />
+      <path d="M4.4 6.6h.01M4.4 12h.01M4.4 17.4h.01" strokeWidth="2.4" />
+    </svg>
+  );
+}
+
+/** Everything else, in the full sheet. */
+export function InfoIcon() {
+  return (
+    <svg {...line}>
+      <circle cx="12" cy="12" r="8.6" />
+      <path d="M12 11v5.4" />
+      <path d="M12 7.7h.01" strokeWidth="2.4" />
+    </svg>
+  );
+}
+
+/* ------------------------------------------------------- title-bar glyphs */
+/*
+ * These three were U+27F3, U+2699 and U+21BA, and were left behind when the
+ * sidebar's own glyphs were redrawn. They have the same problem the others
+ * did: which shape you get depends on which installed font first claims the
+ * codepoint, and U+2699 in particular arrives as a colour emoji on Windows,
+ * where every other control in the row is a monochrome stroke.
+ */
+
+export function SyncIcon() {
+  return (
+    <svg {...line} strokeWidth={1.9}>
+      <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+      <path d="M20.4 3.4v4.2h-4.2" />
+    </svg>
+  );
+}
+
+export function SettingsIcon() {
+  return (
+    <svg {...line} strokeWidth={1.7}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 2.6l.6 2.4a7.2 7.2 0 0 1 2.1.87l2.1-1.3 2.32 2.32-1.3 2.1c.38.65.68 1.36.87 2.1l2.4.6v3.28l-2.4.6a7.2 7.2 0 0 1-.87 2.1l1.3 2.1-2.32 2.32-2.1-1.3a7.2 7.2 0 0 1-2.1.87l-.6 2.4h-3.28l-.6-2.4a7.2 7.2 0 0 1-2.1-.87l-2.1 1.3L2.6 17.9l1.3-2.1a7.2 7.2 0 0 1-.87-2.1l-2.4-.6v-3.28l2.4-.6c.19-.74.49-1.45.87-2.1L2.6 5.1l2.32-2.32 2.1 1.3a7.2 7.2 0 0 1 2.1-.87l.6-2.4z" />
+    </svg>
+  );
+}
+
+/** Put a deleted reminder back: an anticlockwise arrow, the undo direction. */
+export function RestoreIcon() {
+  return (
+    <svg {...line} strokeWidth={1.9}>
+      <path d="M4 12a8 8 0 1 0 2.34-5.66" />
+      <path d="M3.6 3.4v4.2h4.2" />
+    </svg>
+  );
+}
+
+export function CloseIcon() {
+  return (
+    <svg {...line} strokeWidth={1.9}>
+      <path d="M6.4 6.4l11.2 11.2M17.6 6.4L6.4 17.6" />
+    </svg>
+  );
+}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import Sheet from "./Sheet.jsx";
 import { call, invoke } from "../bridge.js";
+import { UI_STYLES, normalizeUi } from "../skin.js";
 
 function Switch({ label, checked, onChange, disabled }) {
   return (
@@ -18,7 +19,7 @@ function Switch({ label, checked, onChange, disabled }) {
 
 export default function SettingsSheet({
   settings, setSettings, lists, appleId, authExpired, onClose, onFullSync, onSignOut,
-  onReauth, onThemeChange,
+  onReauth, onThemeChange, onUiStyleChange,
 }) {
   const [autostart, setAutostart] = useState(false);
   const [autostartNote, setAutostartNote] = useState("");
@@ -33,7 +34,10 @@ export default function SettingsSheet({
     const next = await call("set_settings", patch);
     setSettings(next);
     if ("theme" in patch) onThemeChange(next.theme);
+    if ("ui_style" in patch) onUiStyleChange(next.ui_style);
   };
+
+  const ui = normalizeUi(settings.ui_style);
 
   return (
     <Sheet onClose={onClose} className="wide">
@@ -41,6 +45,26 @@ export default function SettingsSheet({
 
       <div className="settings-group">
         <div className="section-label">Appearance</div>
+        {/* Two whole interfaces rather than one with a skin over it: separate
+            stylesheets, and separate components for the list, the sidebar and
+            the detail pane. Switching takes effect on the next paint. */}
+        <div className="setting-row">
+          <label htmlFor="s-ui">Interface</label>
+          <select
+            id="s-ui"
+            value={ui}
+            onChange={(e) => save({ ui_style: e.target.value })}
+          >
+            {UI_STYLES.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <p className="hint tiny">
+          {(UI_STYLES.find((s) => s.value === ui) || UI_STYLES[0]).hint}
+        </p>
         <div className="setting-row">
           <label htmlFor="s-theme">Theme</label>
           <select
