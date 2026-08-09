@@ -7,18 +7,20 @@ import {
   SMART_ICONS,
   SettingsIcon,
   SyncIcon,
+  TagIcon,
 } from "./icons.jsx";
 
 /**
  * A NavigationView, which is what this pane is in a Windows app.
  *
- * Four things separate it from the Apple sidebar next door, and all four are
- * conventions rather than decoration: the pane collapses to a rail of icons
- * from a hamburger at the top; the selected item is marked by an accent bar at
- * its left edge rather than by a tinted pill; the icons are outlines in the
- * text colour rather than white artwork on coloured circles, with a list's own
- * colour reduced to a dot beside it; and Settings is a footer item in the pane
- * instead of a glyph in a title bar.
+ * The conventions it follows, none of them decoration: the pane collapses to a
+ * rail of icons from a hamburger sharing a row with the app name; the selected
+ * item is marked by an accent bar at its leading edge rather than by a tinted
+ * pill; icons are outlines in the text colour rather than white artwork on
+ * coloured circles, with a list's own colour reduced to a dot; an item's count
+ * is a filled accent badge rather than grey text; tags are items in the pane
+ * rather than a cloud of chips; and Settings is a footer item here instead of
+ * a glyph in a title bar.
  */
 export default function Sidebar({
   smart, counts, lists, tags, scope, listId, tag,
@@ -57,7 +59,15 @@ export default function Sidebar({
       <span className="nav-icon">{icon}</span>
       <span className="nav-name">{name}</span>
       {dot ? <span className="nav-dot" style={{ background: dot }} /> : null}
-      <span className="nav-count">{count}</span>
+      {/* An InfoBadge: a filled accent pill, not grey text. Zero is not news,
+          so it is left off rather than drawn as an empty badge, and a list of
+          1,219 open items is capped -- past a point the number stops being
+          information and starts being a column of digits. */}
+      {count ? (
+        <span className="nav-badge" title={String(count)}>
+          {Number(count) > 999 ? "999+" : count}
+        </span>
+      ) : null}
     </button>
   );
 
@@ -79,7 +89,7 @@ export default function Sidebar({
       {/* Outside the scroller on purpose. There are five of these and a dozen
           lists, and scrolling the selected list into view took Today and
           Upcoming off the top of the pane with it. */}
-      <nav className="nav-items nav-fixed">
+      <nav className="nav-items">
         {smart.map((s) => {
           const active = scope === s.key && !listId && !tag;
           const Glyph = SMART_ICONS[s.key];
@@ -94,10 +104,8 @@ export default function Sidebar({
         })}
       </nav>
 
-      <div className="nav-sep" />
-      <div className="nav-group-label">Lists</div>
-
       <div className="nav-scroll">
+        <div className="nav-group-label">My lists</div>
         <nav className="nav-items">
           {lists.map((l) => {
             const active = listId === l.id && !tag;
@@ -117,28 +125,22 @@ export default function Sidebar({
           })}
         </nav>
 
-        {!collapsed && (
+        {tags.length > 0 && (
           <>
-            <div className="nav-sep" />
             <div className="nav-group-label">Tags</div>
-            <div className="nav-tags">
-              {tags.length === 0 && <span className="win-hint">No tags yet.</span>}
-              {tags.map((t) => (
-                <button
-                  key={t.name}
-                  className={`win-chip${tag === t.name ? " active" : ""}`}
-                  onClick={() =>
-                    onSelect(tag === t.name ? { scope: "today" } : { tag: t.name })
-                  }
-                >
-                  #{t.name}
-                </button>
-              ))}
-            </div>
-            <p className="win-hint nav-note">
-              Tags are read-only — Apple's API accepts tag writes but the
-              Reminders app never renders them.
-            </p>
+            <nav className="nav-items">
+              {tags.map((t) =>
+                item(`tag:${t.name}`, {
+                  active: tag === t.name,
+                  ref: tag === t.name ? activeRef : null,
+                  onClick: () =>
+                    onSelect(tag === t.name ? { scope: "today" } : { tag: t.name }),
+                  icon: <TagIcon />,
+                  name: `#${t.name}`,
+                  count: t.n ?? "",
+                })
+              )}
+            </nav>
           </>
         )}
       </div>
@@ -146,22 +148,14 @@ export default function Sidebar({
       <div className="nav-foot">
         {sync ? <SyncBar sync={sync} /> : null}
         {!sync && !collapsed && <div className="nav-status">{statusText}</div>}
-        <button
-          className="nav-item"
-          onClick={onSync}
-          title="Sync now"
-        >
+        <button className="nav-item" onClick={onSync} title="Sync now">
           <span className="nav-pip" aria-hidden="true" />
           <span className={`nav-icon${sync ? " spinning" : ""}`}>
             <SyncIcon />
           </span>
           <span className="nav-name">Sync now</span>
         </button>
-        <button
-          className="nav-item"
-          onClick={onSettings}
-          title="Settings (Ctrl+,)"
-        >
+        <button className="nav-item" onClick={onSettings} title="Settings (Ctrl+,)">
           <span className="nav-pip" aria-hidden="true" />
           <span className="nav-icon"><SettingsIcon /></span>
           <span className="nav-name">Settings</span>

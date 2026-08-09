@@ -8,19 +8,43 @@ import {
   priorityLabel,
 } from "../../format.js";
 import Composer from "../Composer.jsx";
-import { AddIcon, PrintIcon, RestoreIcon, SearchIcon, SortIcon } from "./icons.jsx";
+import { AddIcon, MoreIcon, RestoreIcon, SearchIcon, SortIcon } from "./icons.jsx";
 
 /** Views that span more than one day read better broken up by date. */
 const DATE_GROUPED = new Set(["upcoming", "all", "today"]);
 
-/** Windows shows priority as a word, not as Apple's run of exclamation marks. */
-const PRIORITY_CLASS = { 1: "high", 5: "medium", 9: "low" };
-
+/**
+ * A ListViewItem.
+ *
+ * Three lines at most: the title, a subtitle of everything that qualifies it,
+ * and the note. The subtitle is plain text joined by middots rather than a run
+ * of coloured badges -- Windows writes "High priority" and lets the type do the
+ * work, where Apple would draw three exclamation marks in red.
+ */
 function Row({
   r, lists, showList, selected, onSelect, onToggle, onRestore, inTrash,
   dateOnly, leaving,
 }) {
-  const prio = PRIORITY_CLASS[Number(r.priority)];
+  const bits = [];
+  if (r.due_date) {
+    bits.push({
+      key: "due",
+      // Under a dated heading the date is redundant; show the time.
+      text: dateOnly ? formatTime(r.due_date, r.all_day) : formatDue(r.due_date, r.all_day),
+      className: `due ${dueClass(r.due_date, r.completed, r.all_day)}`,
+    });
+  }
+  if (Number(r.priority)) {
+    bits.push({ key: "prio", text: `${priorityLabel(r.priority)} priority` });
+  }
+  if (showList) {
+    const l = lists.find((x) => x.id === r.list_id);
+    if (l) bits.push({ key: "list", text: l.title });
+  }
+  for (const t of r.tags || []) {
+    bits.push({ key: `t-${t}`, text: `#${t}`, className: "tag" });
+  }
+
   return (
     <li
       className={
@@ -57,43 +81,31 @@ function Row({
       )}
 
       <div className="win-row-main">
-        <div className="win-row-title">{r.title || "(untitled)"}</div>
-        <div className="win-row-meta">
-          {r.due_date && (
-            <span className={`due ${dueClass(r.due_date, r.completed, r.all_day)}`}>
-              {/* Under a dated heading the date is redundant; show the time. */}
-              {dateOnly
-                ? formatTime(r.due_date, r.all_day)
-                : formatDue(r.due_date, r.all_day)}
-            </span>
-          )}
-          {prio && (
-            <span className={`win-badge prio-${prio}`}>
-              {priorityLabel(r.priority)}
-            </span>
-          )}
-          {showList &&
-            (() => {
-              const l = lists.find((x) => x.id === r.list_id);
-              return l ? (
-                <span className="win-badge list">
-                  <span
-                    className="win-badge-dot"
-                    style={{ background: l.color_hex || "#8E8E93" }}
-                  />
-                  {l.title}
-                </span>
-              ) : null;
-            })()}
-          {(r.tags || []).map((t) => (
-            <span key={t} className="win-badge tag">
-              #{t}
-            </span>
-          ))}
-          {r.dirty ? (
-            <span className="win-pending" title="Not yet synced to iCloud" />
+        <div className="win-row-title">
+          {r.title || "(untitled)"}
+          {r.flagged ? (
+            <span className="win-flag" title="Flagged" aria-label="Flagged" />
           ) : null}
         </div>
+        {/* Boolean(), not the raw value. `dirty` arrives from SQLite as 0 or 1,
+            and `{0 && <div/>}` renders a literal 0 into the row. */}
+        {(bits.length > 0 || Boolean(r.dirty)) && (
+          <div className="win-row-sub">
+            {bits.map((b, i) => (
+              <span key={b.key}>
+                {i > 0 && <span className="win-dot-sep">·</span>}
+                <span className={b.className}>{b.text}</span>
+              </span>
+            ))}
+            {r.dirty ? (
+              <span>
+                {bits.length > 0 && <span className="win-dot-sep">·</span>}
+                <span className="win-pending-text">Waiting to sync</span>
+              </span>
+            ) : null}
+          </div>
+        )}
+        {r.description ? <div className="win-row-note">{r.description}</div> : null}
       </div>
     </li>
   );
@@ -109,7 +121,7 @@ const ListPane = forwardRef(function ListPane(
   },
   ref
 ) {
-  const [sortOpen, setSortOpen] = useState(false);
+  const [menu, setMenu] = useState(null); // sort | more
   const inputRef = useRef(null);
   const composerRef = useRef(null);
 
@@ -166,39 +178,65 @@ const ListPane = forwardRef(function ListPane(
   }, [rows, search, sortBy, scope]);
 
   const showDates = grouped.length > 1 || grouped[0]?.label;
+  const closeMenu = () => setMenu(null);
 
   return (
     <main className="win-content">
       <header className="win-head">
-        <h2 className="win-title">{title.text}</h2>
-
-        {/* A CommandBar: labelled buttons in a row, not a cluster of bare
-            glyphs. Windows names its commands. */}
-        <div className="win-commands">
+        <div className="win-title-row">
+          <h1 className="win-title">{title.text}</h1>
+          {/* The one command that gets a button of its own, and it is the
+              accent one. Everything else is an icon or lives in the overflow,
+              which is how a Windows page header ranks its commands. */}
           <button
-            className="win-cmd"
-            onClick={() => (canCompose ? composerRef.current?.focus() : onNew(null))}
+            className="win-primary"
             title="New reminder (Ctrl+N)"
+            onClick={() => (canCompose ? composerRef.current?.focus() : onNew(null))}
           >
             <AddIcon />
-            <span>New</span>
+            <span>Add reminder</span>
           </button>
+        </div>
+
+        <div className="win-toolbar">
+          {/* An AutoSuggestBox: always on screen, its glyph inside the field on
+              the trailing edge. Windows does not fold search behind a button
+              that expands. */}
+          <div className="win-search">
+            <input
+              ref={inputRef}
+              type="search"
+              placeholder="Search reminders"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.stopPropagation();
+                  setSearch("");
+                }
+              }}
+            />
+            <span className="win-search-icon" aria-hidden="true">
+              <SearchIcon />
+            </span>
+          </div>
 
           <div className="menu-wrap">
             <button
-              className={`win-cmd${sortOpen ? " on" : ""}`}
-              onClick={() => setSortOpen((v) => !v)}
+              className={`win-icon${menu === "sort" ? " on" : ""}`}
+              onClick={() => setMenu(menu === "sort" ? null : "sort")}
               title="Sort"
+              aria-label="Sort"
               aria-haspopup="menu"
-              aria-expanded={sortOpen}
+              aria-expanded={menu === "sort"}
             >
               <SortIcon />
-              <span>Sort</span>
             </button>
-            {sortOpen && (
+            {menu === "sort" && (
               <>
-                <div className="menu-backdrop" onClick={() => setSortOpen(false)} />
+                <div className="menu-backdrop" onClick={closeMenu} />
                 <div className="menu" role="menu">
+                  <div className="menu-label">Sort by</div>
                   {SORTS.map((s) => (
                     <button
                       key={s.value}
@@ -207,7 +245,7 @@ const ListPane = forwardRef(function ListPane(
                       aria-checked={sortBy === s.value}
                       onClick={() => {
                         setSortBy(s.value);
-                        setSortOpen(false);
+                        closeMenu();
                       }}
                     >
                       <span className="tick">{sortBy === s.value ? "✓" : ""}</span>
@@ -219,60 +257,56 @@ const ListPane = forwardRef(function ListPane(
             )}
           </div>
 
-          <button className="win-cmd" onClick={onPrint} title="Print (Ctrl+P)">
-            <PrintIcon />
-            <span>Print</span>
-          </button>
-
-          <span className="win-cmd-gap" />
-
-          {!inTrash && (
-            <label className="win-checkbox">
-              <input
-                type="checkbox"
-                checked={showDone}
-                onChange={(e) => setShowDone(e.target.checked)}
-              />
-              <span>Show completed</span>
-            </label>
-          )}
-
-          {/* An AutoSuggestBox, always on screen. Windows does not hide search
-              behind a magnifier that expands. */}
-          <div className="win-search">
-            <span className="win-search-icon"><SearchIcon /></span>
-            <input
-              ref={inputRef}
-              type="search"
-              placeholder="Search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  e.stopPropagation();
-                  setSearch("");
-                }
-              }}
-            />
+          <div className="menu-wrap">
             <button
-              className={`win-scope${searchScope === "global" ? " global" : ""}`}
-              title="Search this list, or everywhere"
-              onClick={onToggleSearchScope}
+              className={`win-icon${menu === "more" ? " on" : ""}`}
+              onClick={() => setMenu(menu === "more" ? null : "more")}
+              title="More"
+              aria-label="More options"
+              aria-haspopup="menu"
+              aria-expanded={menu === "more"}
             >
-              {searchScope === "global" ? "All" : "List"}
+              <MoreIcon />
             </button>
+            {menu === "more" && (
+              <>
+                <div className="menu-backdrop" onClick={closeMenu} />
+                <div className="menu" role="menu">
+                  <button
+                    className="menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      closeMenu();
+                      onPrint();
+                    }}
+                  >
+                    <span className="tick" />
+                    Print…
+                  </button>
+                  <button
+                    className="menu-item"
+                    role="menuitemcheckbox"
+                    aria-checked={searchScope === "global"}
+                    onClick={() => {
+                      onToggleSearchScope();
+                      closeMenu();
+                    }}
+                  >
+                    <span className="tick">{searchScope === "global" ? "✓" : ""}</span>
+                    Search everywhere
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
 
-        <div className="win-subhead">
-          {search
-            ? `${rows.length} result${rows.length === 1 ? "" : "s"} ${
-                globalSearch ? "everywhere" : "in this list"
-              }`
-            : scope === "completed"
-            ? "50 most recently completed"
-            : ""}
-        </div>
+        {search ? (
+          <div className="win-subhead">
+            {rows.length} result{rows.length === 1 ? "" : "s"}{" "}
+            {globalSearch ? "everywhere" : "in this list"}
+          </div>
+        ) : null}
       </header>
 
       {/* Re-keyed per view: the rows are all replaced on a switch anyway, and
@@ -328,6 +362,29 @@ const ListPane = forwardRef(function ListPane(
             than above everything the list already has. */}
         {composer}
       </div>
+
+      {/* A status bar. The filter that changes what the list contains belongs
+          next to the count of what it contains, not up among the commands. */}
+      <footer className="win-statusbar">
+        {!inTrash ? (
+          <label className="win-switch inline">
+            <input
+              type="checkbox"
+              checked={showDone}
+              onChange={(e) => setShowDone(e.target.checked)}
+            />
+            <span className="win-switch-track" aria-hidden="true" />
+            <span className="win-switch-text">Show completed</span>
+          </label>
+        ) : (
+          <span />
+        )}
+        <span className="win-count">
+          {scope === "completed"
+            ? "50 most recently completed"
+            : `${rows.length} reminder${rows.length === 1 ? "" : "s"}`}
+        </span>
+      </footer>
     </main>
   );
 });

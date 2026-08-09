@@ -154,7 +154,7 @@ await shoot("04-conflict", {
 // that has to stay honest.
 const composeInPlace = async (page) => {
   await selectInbox(page);
-  await page.click(".add-btn, .win-cmd");
+  await page.click(".add-btn, .win-primary");
   await page.waitForTimeout(300);
   await page.fill(".cc-title", "Order lab safety goggles");
   await page.fill(".cc-note", "Needed before Thursday's titration.");
@@ -315,6 +315,21 @@ await shoot("24-winui-settings", {
     await selectInbox(page);
     await page.click('.nav-item[title^="Settings"]');
     await page.waitForTimeout(350);
+  },
+});
+
+// The detail pane as a form, which is the part that changed most.
+await shoot("25-winui-detail", {
+  flags: winui,
+  prep: async (page) => {
+    await selectInbox(page);
+    await page.evaluate(() => {
+      const r = [...document.querySelectorAll(".win-row")].find((x) =>
+        x.textContent.includes("Renew library books")
+      );
+      if (r) r.click();
+    });
+    await page.waitForTimeout(400);
   },
 });
 

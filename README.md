@@ -78,27 +78,35 @@ attachments, location triggers, sharing, and natural-language date entry.
 </tr>
 <tr>
 <td><img src="docs/screenshots/07-new-reminder.png" alt="A reminder being typed in place, with a date already chosen"></td>
-<td><img src="docs/screenshots/20-composer-dates.png" alt="The date menu: None, Today, Tomorrow, Next Weekend, Next Week, Custom"></td>
+<td><img src="docs/screenshots/11-settings.png" alt="Settings, with the interface picker"></td>
 </tr>
 <tr>
 <td><b>New reminders</b> are typed where they will appear, not in a dialog</td>
-<td><b>A date</b> is one press away, and each preset shows the day it lands on</td>
+<td><b>Settings</b>, where the interface is chosen</td>
 </tr>
 <tr>
 <td><img src="docs/screenshots/21-winui-light.png" alt="The same app in the Fluent interface"></td>
 <td><img src="docs/screenshots/22-winui-dark.png" alt="The Fluent interface in dark theme"></td>
 </tr>
 <tr>
-<td><b>The Windows interface</b> — a NavigationView, a command bar, Fluent controls</td>
+<td><b>The Windows interface</b> — a NavigationView, InfoBadge counts, Fluent controls</td>
 <td><b>The same, dark.</b> Both interfaces follow the theme independently</td>
 </tr>
 <tr>
-<td><img src="docs/screenshots/13-print-options.png" alt="Print options: grouping, notes, completed items"></td>
+<td><img src="docs/screenshots/25-winui-detail.png" alt="The Fluent detail pane as a captioned form"></td>
 <td><img src="docs/screenshots/23-winui-composer.png" alt="The composer in the Fluent interface"></td>
 </tr>
 <tr>
-<td><b>Printing</b> any view, grouped, with tick boxes</td>
+<td><b>Editing</b> as a WinUI form, with Save disabled until there is a change</td>
 <td><b>The same gesture</b> in the other interface, drawn the Windows way</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/13-print-options.png" alt="Print options: grouping, notes, completed items"></td>
+<td><img src="docs/screenshots/20-composer-dates.png" alt="The date menu"></td>
+</tr>
+<tr>
+<td><b>Printing</b> any view, grouped, with tick boxes</td>
+<td><b>Quick dates</b>, each preset showing the day it lands on</td>
 </tr>
 </table>
 
@@ -309,10 +317,13 @@ They are separate interfaces rather than a palette swap, because a palette swap
 would not get either one right. Fluent disagrees with Apple about more than
 colour: 4px corners on controls and 8px on surfaces against Apple's four radii,
 a 32px control height, selection marked by a 3px bar at a row's leading edge
-instead of a tint across the whole row, commands that carry names rather than
-being bare glyphs, search that is always on screen rather than folded behind a
-magnifier, toggles at 40×20 rather than 42×25, and a detail pane built from
-bordered settings cards rather than an inset group of borderless fields.
+instead of a tint across the whole row, one accent button for the page's
+primary command with everything else an icon or an overflow item, search that
+is always on screen rather than folded behind a magnifier, counts as filled
+InfoBadges rather than grey numerals, toggles at 40×20 that state their own
+value, a status bar carrying the filter and the count, and a detail pane of
+captioned fields with a Save button that stays disabled until there is
+something to save.
 
 So the sidebar, the list and the detail pane are separate components per
 interface, and each has its own complete stylesheet. Exactly one of the two is

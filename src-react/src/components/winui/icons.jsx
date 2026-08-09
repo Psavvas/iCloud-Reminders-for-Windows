@@ -161,6 +161,25 @@ export function AddIcon() {
   );
 }
 
+/** The command-bar overflow. Three dots, the way Windows draws "more". */
+export function MoreIcon() {
+  return (
+    <svg {...g} strokeWidth={2.2}>
+      <path d="M5 10h.01M10 10h.01M15 10h.01" />
+    </svg>
+  );
+}
+
+/** A tag in the navigation pane. */
+export function TagIcon() {
+  return (
+    <svg {...g}>
+      <path d="M3.2 8.4V4.6a1.4 1.4 0 0 1 1.4-1.4h3.8a1.4 1.4 0 0 1 1 .41l7 7a1.4 1.4 0 0 1 0 1.98l-3.8 3.8a1.4 1.4 0 0 1-1.98 0l-7-7a1.4 1.4 0 0 1-.42-1z" />
+      <path d="M6.6 6.6h.01" strokeWidth="2" />
+    </svg>
+  );
+}
+
 export function BackIcon() {
   return (
     <svg {...g}>
