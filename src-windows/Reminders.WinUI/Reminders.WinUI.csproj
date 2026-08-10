@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>Reminders.Windows</RootNamespace>
+    <AssemblyName>Reminders</AssemblyName>
+    <ApplicationIcon>Assets\icon-v2.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <RuntimeIdentifier Condition="'$(Platform)' == 'x64'">win-x64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(Platform)' == 'ARM64'">win-arm64</RuntimeIdentifier>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Version>0.3.0</Version>
+    <Product>Reminders for Windows</Product>
+    <Authors>C Denihan; Paul Savvas</Authors>
+    <Company>paulsavvas.com</Company>
+    <Description>An independent native Windows client compatible with Apple iCloud Reminders.</Description>
+    <PackageProjectUrl>https://paulsavvas.com</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Psavvas/iCloud-Reminders-for-Windows</RepositoryUrl>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.1.3" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\icon-v2.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\icon-v2.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!-- The unpackaged WinUI SDK build places compiled XAML beside the target
+       but its generic Publish target does not include those files. Without
+       them Microsoft.UI.Xaml fails during COM activation before a window can
+       be created. Keep publish output equivalent to the working build output. -->
+  <Target Name="CopyCompiledWinUIResources" AfterTargets="Publish">
+    <ItemGroup>
+      <CompiledWinUIResource Include="$(TargetDir)*.xbf" />
+      <CompiledWinUIResource Include="$(TargetDir)$(AssemblyName).pri" />
+    </ItemGroup>
+    <Copy SourceFiles="@(CompiledWinUIResource)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

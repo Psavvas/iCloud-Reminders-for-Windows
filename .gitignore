@@ -1,29 +1,31 @@
-.venv/
-.venv-*/
-__pycache__/
-*.py[cod]
-
-# Spike output is per-run and account-specific; never commit it.
-spike/results.md
-
-# Never commit anything that could carry session tokens or cookies.
+# Never commit anything that could carry credentials, account data, or signing keys.
+.env
+.env.*
+!.env.example
 *.session
 cookies/
 .pyicloud/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.pfx
+*.p12
+*.pem
+*.key
 
-# Build output
-node_modules/
-src-tauri/target/
-*.egg-info/
-sidecar/build/
+# Rust and .NET build output
+.cargo-task-cache/
+sidecar/target/
+src-windows/**/bin/
+src-windows/**/obj/
 dist-sidecar/*
 !dist-sidecar/README.md
+dist-windows/
+dist-windows-arm64/
+dist-msix/
+
+# Local tooling
+node_modules/
 build/
 *.spec
-
-# Screenshot tooling deps
-tools/screenshots/node_modules/
-
-# Vite output and UI deps
-dist/
-src-react/node_modules/
