@@ -54,7 +54,16 @@ impl<'a> CloudKit<'a> {
                 "",
             ));
         }
-        let origin = service.url.trim_end_matches('/');
+        // Rebuild from the parsed URL rather than the raw string. Validating
+        // one value and using another means a service URL carrying a query or
+        // fragment would pass the checks above and then land the operation
+        // name in the wrong place once `post` appends it.
+        let port = parsed
+            .port()
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default();
+        let path = parsed.path().trim_end_matches('/');
+        let origin = format!("https://{host}{port}{path}");
         Ok(Self {
             auth,
             base: format!("{origin}/database/1/{CONTAINER}/{ENVIRONMENT}/{DATABASE}"),
@@ -369,4 +378,87 @@ fn cloudkit_detail(text: &str) -> String {
         }
     }
     "Apple returned an error without a public reason".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CloudKit, field, int_field, reference_field, text_field};
+    use crate::auth::{AuthClient, Service, SessionState};
+    use serde_json::json;
+
+    fn client_for(url: &str) -> AuthClient {
+        let mut state = SessionState::default();
+        state.webservices.insert(
+            "ckdatabasews".into(),
+            Service { url: url.into(), status: "active".into() },
+        );
+        AuthClient::new(Some(state)).expect("build auth client")
+    }
+
+    #[test]
+    fn accepts_apple_service_hosts() {
+        // Apple hands back an explicit :443, which Url normalises away as the
+        // default for https. A non-default port must survive.
+        for (url, expected) in [
+            (
+                "https://p52-ckdatabasews.icloud.com:443",
+                "https://p52-ckdatabasews.icloud.com/database/1/com.apple.reminders/production/private",
+            ),
+            (
+                "https://p52-ckdatabasews.icloud.com:8443",
+                "https://p52-ckdatabasews.icloud.com:8443/database/1/com.apple.reminders/production/private",
+            ),
+            (
+                "https://icloud.com/",
+                "https://icloud.com/database/1/com.apple.reminders/production/private",
+            ),
+        ] {
+            let auth = client_for(url);
+            let cloudkit = CloudKit::new(&auth).expect("an icloud.com host is allowed");
+            assert_eq!(cloudkit.base, expected, "for {url}");
+        }
+    }
+
+    #[test]
+    fn rejects_hosts_outside_icloud() {
+        for url in [
+            "https://evil.example.com",
+            "http://p52-ckdatabasews.icloud.com",   // plaintext
+            "https://icloud.com.evil.example.com",  // suffix confusion
+            "https://user:pw@p52-ckdatabasews.icloud.com", // embedded credentials
+            "https://noticloud.com",
+        ] {
+            let auth = client_for(url);
+            assert!(
+                CloudKit::new(&auth).is_err(),
+                "{url} must not be accepted as a CloudKit endpoint"
+            );
+        }
+    }
+
+    #[test]
+    fn a_service_url_with_a_query_does_not_corrupt_the_request_path() {
+        // The URL is validated as parsed, so it must also be *used* as parsed:
+        // carrying the query through would put it ahead of the operation name.
+        let auth = client_for("https://p52-ckdatabasews.icloud.com/x?token=abc#frag");
+        let cloudkit = CloudKit::new(&auth).expect("host is still an Apple host");
+        assert!(!cloudkit.base.contains('?'), "query must be dropped: {}", cloudkit.base);
+        assert!(!cloudkit.base.contains('#'), "fragment must be dropped: {}", cloudkit.base);
+    }
+
+    #[test]
+    fn record_fields_unwrap_cloudkit_value_envelopes() {
+        let record = json!({
+            "fields": {
+                "title": {"value": "Buy milk", "type": "STRING"},
+                "priority": {"value": 2, "type": "INT64"},
+                "listRef": {"value": {"recordName": "list-1"}, "type": "REFERENCE"}
+            }
+        });
+        assert_eq!(text_field(&record, "title").as_deref(), Some("Buy milk"));
+        assert_eq!(int_field(&record, "priority"), 2);
+        assert_eq!(reference_field(&record, "listRef").as_deref(), Some("list-1"));
+        assert!(field(&record, "missing").is_none());
+        assert_eq!(int_field(&record, "missing"), 0, "absent ints default to zero");
+    }
 }

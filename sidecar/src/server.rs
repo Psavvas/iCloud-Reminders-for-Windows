@@ -303,8 +303,8 @@ impl Server {
                     .map(Value::String)
                     .unwrap_or(Value::Null),
             );
-        } else if p.contains_key("all_day") && all_day {
-            if let Some(value) = current.due_date.as_ref() {
+        } else if p.contains_key("all_day") && all_day
+            && let Some(value) = current.due_date.as_ref() {
                 fields.insert(
                     "due_date".into(),
                     normalize_due(&Value::String(value.clone()), true)?
@@ -312,13 +312,11 @@ impl Server {
                         .unwrap_or(Value::Null),
                 );
             }
-        }
         for key in ["completed", "flagged"] {
-            if let Some(value) = fields.get_mut(key) {
-                if let Some(flag) = value.as_bool() {
+            if let Some(value) = fields.get_mut(key)
+                && let Some(flag) = value.as_bool() {
                     *value = json!(flag as i64);
                 }
-            }
         }
         self.cache.apply_local_edit(id, &fields)?;
         self.cache.enqueue(
@@ -408,9 +406,9 @@ impl Server {
             .get("id")
             .and_then(Value::as_i64)
             .ok_or_else(|| AppError::bad_request("missing conflict id"))?;
-        if p.get("keep").and_then(Value::as_str) == Some("local") {
-            if let Some(conflict) = self.cache.conflicts()?.into_iter().find(|c| c.id == id) {
-                if let Some(local) = conflict.local.as_object() {
+        if p.get("keep").and_then(Value::as_str) == Some("local")
+            && let Some(conflict) = self.cache.conflicts()?.into_iter().find(|c| c.id == id)
+                && let Some(local) = conflict.local.as_object() {
                     let fields: Map<_, _> = local
                         .iter()
                         .filter(|(k, _)| {
@@ -435,8 +433,6 @@ impl Server {
                     )?;
                     self.kick_push();
                 }
-            }
-        }
         self.cache.resolve_conflict(id)?;
         Ok(json!({"resolved":id}))
     }
@@ -492,4 +488,137 @@ fn validate_length(name: &str, value: &str, max_bytes: usize) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Server;
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use tokio::sync::mpsc::{self, UnboundedReceiver};
+
+    fn server() -> (tempfile::TempDir, Arc<Server>, UnboundedReceiver<Value>) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let server = Server::open(dir.path(), Some("someone@example.com".into()), tx)
+            .expect("open server");
+        (dir, server, rx)
+    }
+
+    #[tokio::test]
+    async fn ping_answers_without_an_account() {
+        let (_dir, server, _rx) = server();
+        let result = server.dispatch("ping", json!({})).await.expect("ping works");
+        assert_eq!(result, json!({"pong": true}));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_method_reports_no_method() {
+        let (_dir, server, _rx) = server();
+        let error = server
+            .dispatch("definitely_not_a_method", json!({}))
+            .await
+            .expect_err("unknown methods must fail");
+        assert_eq!(error.code(), "BAD_REQUEST");
+        // main.rs rewrites this marker into the NO_METHOD wire code.
+        assert_eq!(error.body().detail, "NO_METHOD");
+    }
+
+    #[tokio::test]
+    async fn missing_parameters_are_rejected_rather_than_defaulted() {
+        let (_dir, server, _rx) = server();
+        for (method, params) in [
+            ("reminder", json!({})),
+            ("submit_2fa", json!({})),
+            ("create_reminder", json!({"title": "no list"})),
+            ("update_reminder", json!({"title": "no id"})),
+        ] {
+            let error = server
+                .dispatch(method, params)
+                .await
+                .expect_err(&format!("{method} must require its parameters"));
+            assert_eq!(error.code(), "BAD_REQUEST", "{method}");
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_strings_are_refused() {
+        let (_dir, server, _rx) = server();
+        let error = server
+            .dispatch(
+                "create_reminder",
+                json!({"list_id": "list-1", "title": "t".repeat(8192)}),
+            )
+            .await
+            .expect_err("an over-long title must be refused");
+        assert_eq!(error.code(), "BAD_REQUEST");
+    }
+
+    #[tokio::test]
+    async fn a_reminder_survives_create_update_and_delete() {
+        let (_dir, server, _rx) = server();
+        let created = server
+            .dispatch(
+                "create_reminder",
+                json!({"list_id": "list-1", "title": "Water the plants"}),
+            )
+            .await
+            .expect("create works offline");
+        let id = created["id"].as_str().expect("an id").to_owned();
+        assert!(id.starts_with("local/"), "unsynced rows get a local id");
+
+        server
+            .dispatch("update_reminder", json!({"id": id, "title": "Water them well"}))
+            .await
+            .expect("update works offline");
+        let fetched = server
+            .dispatch("reminder", json!({"id": id}))
+            .await
+            .expect("read back");
+        assert_eq!(fetched["title"], json!("Water them well"));
+
+        server
+            .dispatch("delete_reminder", json!({"id": id}))
+            .await
+            .expect("delete works offline");
+        let listed = server.dispatch("reminders", json!({})).await.expect("list");
+        assert!(
+            listed.as_array().is_some_and(|rows| rows.is_empty()),
+            "a deleted reminder should leave the default view"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_round_trip_through_the_protocol() {
+        let (_dir, server, _rx) = server();
+        server
+            .dispatch("set_settings", json!({"sync_minutes": 45}))
+            .await
+            .expect("settings accepted");
+        let settings = server.dispatch("settings", json!({})).await.expect("read back");
+        assert_eq!(settings["sync_minutes"], json!(45));
+    }
+
+    #[tokio::test]
+    async fn signing_out_with_purge_leaves_the_cursor_readable() {
+        let (_dir, server, _rx) = server();
+        server
+            .dispatch("sign_out", json!({"purge": true}))
+            .await
+            .expect("sign out works");
+        // Regression: clearing the cursor used to store SQL NULL, after which
+        // every later read failed and sync could never restart.
+        server
+            .dispatch("sync_status", json!({}))
+            .await
+            .expect("sync status must still be readable after a purge");
+    }
+
+    #[tokio::test]
+    async fn auth_status_reports_a_signed_out_account() {
+        let (_dir, server, _rx) = server();
+        let status = server.dispatch("auth_status", json!({})).await.expect("status");
+        assert_eq!(status["authenticated"], json!(false));
+        assert_eq!(status["has_cache"], json!(false));
+    }
 }

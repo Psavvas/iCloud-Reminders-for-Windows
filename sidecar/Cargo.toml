@@ -1,6 +1,8 @@
 [package]
 name = "reminders-sidecar"
-version = "0.2.0"
+# Keep in step with src-windows/Reminders.WinUI/Reminders.WinUI.csproj <Version>.
+# CI enforces this (see .github/workflows/build.yml, "Check versions agree").
+version = "0.3.0"
 description = "Native iCloud Reminders connector for the Windows desktop app"
 edition = "2024"
 rust-version = "1.88"

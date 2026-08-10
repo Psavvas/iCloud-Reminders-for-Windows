@@ -12,7 +12,7 @@ list/reminder/tag reads, reminder create/update/soft-delete/restore, delta/full
 sync, conflict handling, settings, and due notifications.
 
 This is a source review, not a claim that Apple's private Reminders protocol is
-stable or officially supported. Validation was performed on Windows: the five
+stable or officially supported. Validation was performed on Windows: the
 account-free Rust tests, release sidecar protocol smoke test, x64 native publish,
 and x64 MSIX assembly passed. GitHub Actions also compiled and packaged the x64
 and ARM64 variants; only artifact upload failed because the private repository's
@@ -74,35 +74,49 @@ session state uses the Windows-native credential backend.
 
 ## Residual risks and release blockers
 
-1. **Live-account validation is still required.** SRP, 2FA, trust,
-   terms acceptance, CloudKit record shapes, conflict behavior, and all due-date
-   timezone cases must be exercised with a dedicated test account. Start with
-   read-only sync; test mutations only on disposable reminders and lists.
-2. **Audit the locked Rust dependency graph.** `sidecar/Cargo.lock` is committed
-   and the account-free tests pass. Run `cargo audit` or an equivalent RustSec
-   scan before release and review lockfile changes like source changes.
-3. **The local reminder cache is plaintext.** Windows user ACLs protect the app
+1. **Live-account validation is still required.** 2FA, trust, terms acceptance,
+   CloudKit record shapes, conflict behavior, and all due-date timezone cases
+   must be exercised with a dedicated test account. Start with read-only sync;
+   test mutations only on disposable reminders and lists.
+
+   The SRP cryptography itself is no longer unverified: `sidecar/src/auth.rs`
+   now asserts M1, M2 and the password derivation against vectors generated
+   from pyicloud + the `srp` package, which is the stack the previous Python
+   sidecar used against Apple in production. See
+   `docs/srp-reference-vectors.md`. What remains untested is the flow around
+   it — cookie and header capture, trust tokens, session restore.
+2. **SRP salts beginning with `0x00` are an open question.** pyicloud routes the
+   salt through an OpenSSL BIGNUM and so strips leading zero bytes; this
+   implementation hashes the salt verbatim. The two agree for every other salt.
+   Roughly one account in 256 would be affected, and because the salt is fixed
+   when the password is set, such an account fails sign-in *every* time rather
+   than intermittently — it looks exactly like a wrong password. Settle this
+   against a disposable account before release; do not guess a fix.
+3. **Audit the locked Rust dependency graph.** `sidecar/Cargo.lock` is committed
+   and the account-free tests pass. CI now runs `cargo audit` and
+   `cargo clippy -D warnings` on every build; keep reviewing lockfile changes
+   like source changes.
+4. **The local reminder cache is plaintext.** Windows user ACLs protect the app
    data directory, but another process running as the same user can read it.
    Credentials and tokens are not in this database. Encrypting reminder content
    would require a separate product decision covering key lifecycle, search,
    migration, recovery, and crash consistency.
-4. **Apple's web protocol is private and can drift.** Client build constants,
+5. **Apple's web protocol is private and can drift.** Client build constants,
    endpoints, and record encodings may change without notice. Authentication
    failures must fail closed; do not add fallback endpoints or relax the Apple
    hostname check to restore compatibility.
-5. **The protocol line limit is enforced after line allocation.** The only
-   writer is the parent WinUI process, so this is a local same-user hardening
-   limitation rather than a network exposure. A future framed transport can
+6. **The protocol reader is now bounded before allocation.** `main.rs` caps
+   stdin with `take`, so an over-long line is refused rather than buffered. The
+   only writer is the parent WinUI process, so a future framed transport can
    enforce the cap before allocation.
-6. **Independent review is outstanding.** This implementation and audit were
+7. **Independent review is outstanding.** This implementation and audit were
    produced in the same change set. A second reviewer should inspect SRP math,
    CloudKit mutations, credential lifecycle, and installer path selection.
 
 ## Release verification
 
-Run these on a disposable Windows VM or CI runner. Items 1, 4, and 5 passed in
-the current review. Clippy and `cargo audit` were not installed, and no tools
-were installed solely for this audit.
+Run these on a disposable Windows VM or CI runner. Items 1 and 2 now run in CI
+on every build; item 3 does too.
 
 1. `cargo test --manifest-path .\sidecar\Cargo.toml --locked`
 2. `cargo clippy --manifest-path .\sidecar\Cargo.toml --all-targets -- -D warnings`

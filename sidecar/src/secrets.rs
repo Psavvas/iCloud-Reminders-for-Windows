@@ -6,9 +6,12 @@ use zeroize::Zeroizing;
 
 use crate::error::{AppError, Result};
 
-const PASSWORD_SERVICE: &str = "com.cdenihan.reminders-sync.password";
-const SESSION_SERVICE: &str = "com.cdenihan.reminders-sync.session";
-const SESSION_CHUNK_SERVICE: &str = "com.cdenihan.reminders-sync.session.chunk";
+// These names are visible to users in Windows Credential Manager and are a
+// persistence key: renaming them after a release orphans every stored
+// credential and silently signs people out. Treat them as a stable format.
+const PASSWORD_SERVICE: &str = "com.paulsavvas.reminders-sync.password";
+const SESSION_SERVICE: &str = "com.paulsavvas.reminders-sync.session";
+const SESSION_CHUNK_SERVICE: &str = "com.paulsavvas.reminders-sync.session.chunk";
 // Windows Credential Manager accepts at most 2,560 bytes per generic
 // credential. keyring stores passwords as UTF-16, so stay comfortably below
 // the 1,280-code-unit hard limit.

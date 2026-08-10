@@ -1,6 +1,11 @@
 //! Native implementation of Apple's web SRP sign-in and setup-session flow.
-//! Passwords are zeroized after use. Only the OS credential vault may persist
-//! credentials or session tokens.
+//! Only the OS credential vault may persist credentials or session tokens.
+//!
+//! Derived key material (the PBKDF2 output, the SRP session key, the private
+//! exponent) is held in `Zeroizing` and wiped on drop. The caller's plaintext
+//! password is not: it also lives in the parsed request `Value` and in the raw
+//! stdin line for the life of the request, so treat process memory as holding
+//! the password until the request completes rather than assuming it is wiped.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -501,6 +506,15 @@ fn make_proof(
             detail: String::new(),
         });
     }
+    // KNOWN DIVERGENCE, needs a live account to settle (see
+    // docs/srp-reference-vectors.md). pyicloud's SRP backend routes the salt
+    // through an OpenSSL BIGNUM in both `gen_x` and `calculate_M`, which strips
+    // leading zero bytes. We hash the salt verbatim. The two agree for every
+    // salt whose first byte is non-zero -- which the vectors below cover -- and
+    // disagree for roughly one account in 256. Because the salt is fixed when
+    // the password is set, an affected account would fail sign-in every time
+    // rather than intermittently. Do not "fix" this by guessing: confirm
+    // against a disposable account whose salt starts with 0x00.
     let salt = B64
         .decode(&challenge.salt)
         .map_err(|e| AppError::bad_request(format!("invalid SRP salt: {e}")))?;
@@ -527,6 +541,14 @@ fn make_proof(
     let b_pad = pad(&b_pub, width);
     let k = BigUint::from_bytes_be(&hash(&[&n_pad, &g_pad]));
     let u = BigUint::from_bytes_be(&hash(&[&a_pad, &b_pad]));
+    // SRP-6a requires aborting when u == 0; continuing would drop the server
+    // public value out of the shared-secret exponent entirely.
+    if u == BigUint::default() {
+        return Err(AppError::AuthRequired {
+            message: "iCloud returned an invalid sign-in challenge".into(),
+            detail: String::new(),
+        });
+    }
     let gx = g.modpow(&x, &n);
     let base = (&b_pub + &n - ((&k * gx) % &n)) % &n;
     let exponent = private + (&u * &x);
@@ -541,39 +563,6 @@ fn make_proof(
     let m1 = hash(&[&xor, &h_user, &salt, &a_bytes, &b_bytes, &session_key]);
     let m2 = hash(&[&a_bytes, &m1, &session_key]);
     Ok(SrpProof { m1, m2 })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{derive_password, hash, lower_hex};
-
-    fn hex(bytes: &[u8]) -> String {
-        String::from_utf8(lower_hex(bytes)).expect("hex is ASCII")
-    }
-
-    #[test]
-    fn apple_password_derivation_matches_independent_vectors() {
-        let password = b"correct horse battery staple";
-        let salt: Vec<u8> = (0..16).collect();
-
-        let s2k = derive_password(password, &salt, 1000, "s2k");
-        assert_eq!(
-            hex(s2k.as_ref()),
-            "6b7cc6edb94620dcf9811c616742ca428fe81b5bede8478a876a895345ded185"
-        );
-
-        let s2k_fo = derive_password(password, &salt, 1000, "s2k_fo");
-        assert_eq!(
-            hex(s2k_fo.as_ref()),
-            "5df3f8614930d6e2cf855fc8ddec13b51431c6c08e3375a1ef346686965d049e"
-        );
-
-        let inner = hash(&[b":", s2k_fo.as_ref()]);
-        assert_eq!(
-            hex(&hash(&[&salt, &inner])),
-            "42bb4a1784a729202320441ea9cb4866966552e000de056e690160dfad2266f4"
-        );
-    }
 }
 
 fn insert(headers: &mut HeaderMap, name: &'static str, value: &str) -> Result<()> {
@@ -598,7 +587,27 @@ fn classify_auth(status: u16, body: &str) -> AppError {
             detail,
         };
     }
-    if status == 409 || body.contains("hsa2") || body.contains("verification") {
+    // Match on parsed fields rather than searching the whole body: an
+    // unrelated error whose text merely mentions "verification" would
+    // otherwise push the user into a 2FA prompt they cannot satisfy.
+    let parsed: Option<Value> = serde_json::from_str(body).ok();
+    let two_factor = status == 409
+        || parsed.as_ref().is_some_and(|value| {
+            let field = |pointer: &str| {
+                value
+                    .pointer(pointer)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+            };
+            field("/authType").contains("hsa")
+                || field("/serviceErrors/0/code") == "hsa2"
+                || value
+                    .pointer("/hsaChallengeRequired")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+        });
+    if two_factor {
         return AppError::TwoFactorRequired {
             message: "Two-factor authentication required".into(),
             detail,
@@ -655,4 +664,138 @@ pub(crate) async fn bounded_response_text(mut response: reqwest::Response) -> Re
     }
     String::from_utf8(body)
         .map_err(|e| AppError::internal("iCloud returned invalid text", e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SrpChallenge, derive_password, hash, lower_hex, make_proof};
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as B64;
+    use num_bigint::BigUint;
+
+    fn hex(bytes: &[u8]) -> String {
+        String::from_utf8(lower_hex(bytes)).expect("hex is ASCII")
+    }
+
+    // Reference values produced by the stack the deleted Python sidecar used:
+    // pyicloud 2.6.5's SrpPassword together with srp 1.0.22, driven with
+    // `srp.rfc5054_enable()` and `srp.no_username_in_x()` exactly as
+    // pyicloud.base does. Regenerate with the script in
+    // docs/srp-reference-vectors.md if Apple's parameters ever change.
+    const VECTOR_USER: &str = "vector@example.com";
+    const VECTOR_PASSWORD: &[u8] = b"correct horse battery staple";
+    const VECTOR_SALT_B64: &str = "AQIDBAUGBwgJCgsMDQ4PEA==";
+    const VECTOR_B_B64: &str = concat!(
+        "16nx1fXiKf9ErlKozGDyuLLTNIjPBJAf5qOPi45DFvjXqfHV9eIp/0SuUqjMYPK4stM0iM8EkB/mo4+L",
+        "jkMW+Nep8dX14in/RK5SqMxg8riy0zSIzwSQH+ajj4uOQxb416nx1fXiKf9ErlKozGDyuLLTNIjPBJAf",
+        "5qOPi45DFvjXqfHV9eIp/0SuUqjMYPK4stM0iM8EkB/mo4+LjkMW+Nep8dX14in/RK5SqMxg8riy0zSI",
+        "zwSQH+ajj4uOQxb416nx1fXiKf9ErlKozGDyuLLTNIjPBJAf5qOPi45DFvjXqfHV9eIp/0SuUqjMYPK4",
+        "stM0iM8EkB/mo4+LjkMW+A=="
+    );
+
+    fn vector_challenge(protocol: &str) -> SrpChallenge {
+        SrpChallenge {
+            server_public: VECTOR_B_B64.into(),
+            challenge: "c".into(),
+            iterations: 1000,
+            protocol: protocol.into(),
+            salt: VECTOR_SALT_B64.into(),
+        }
+    }
+
+    /// The private exponent pyicloud passed as `bytes_a` when the vectors
+    /// below were generated.
+    fn vector_private() -> BigUint {
+        BigUint::from_bytes_be(&(1u8..=32).collect::<Vec<u8>>())
+    }
+
+    #[test]
+    fn srp_proof_matches_pyicloud_reference_vectors() {
+        for (protocol, m1, m2) in [
+            (
+                "s2k",
+                "65d959dcd99bb14ebe4cdf8d57fee4fc15fd3375df8f06f8a7fd73ea83bc933f",
+                "02927bdb75a3a2322e789cc4d0c7e90d3b8c08c449ccf9d380e9dcc19ea6fb92",
+            ),
+            (
+                "s2k_fo",
+                "082a47581fdec08156bc4135d3d8d171920c3126cf307f966d459ea5043bafdf",
+                "add0f31339cc14e4618d8d47ee1032c23897122b475b600046d96aaf7cf45579",
+            ),
+        ] {
+            let proof = make_proof(
+                VECTOR_USER,
+                VECTOR_PASSWORD,
+                vector_private(),
+                &vector_challenge(protocol),
+            )
+            .expect("the reference challenge is well formed");
+            assert_eq!(hex(&proof.m1), m1, "m1 mismatch for {protocol}");
+            assert_eq!(hex(&proof.m2), m2, "m2 mismatch for {protocol}");
+        }
+    }
+
+    #[test]
+    fn srp_proof_rejects_a_degenerate_server_public_value() {
+        let mut challenge = vector_challenge("s2k");
+        challenge.server_public = B64.encode(super::modulus().expect("modulus").to_bytes_be());
+        assert!(
+            make_proof(
+                VECTOR_USER,
+                VECTOR_PASSWORD,
+                vector_private(),
+                &challenge
+            )
+            .is_err(),
+            "B congruent to 0 mod N must abort"
+        );
+    }
+
+    #[test]
+    fn srp_proof_rejects_unsupported_parameters() {
+        for mutate in [
+            (|c: &mut SrpChallenge| c.protocol = "s2k_unknown".into()) as fn(&mut SrpChallenge),
+            |c: &mut SrpChallenge| c.iterations = 0,
+            |c: &mut SrpChallenge| c.iterations = 2_000_000,
+            |c: &mut SrpChallenge| c.salt = B64.encode([0u8; 65]),
+            |c: &mut SrpChallenge| c.salt = B64.encode([]),
+        ] {
+            let mut challenge = vector_challenge("s2k");
+            mutate(&mut challenge);
+            assert!(
+                make_proof(
+                    VECTOR_USER,
+                    VECTOR_PASSWORD,
+                    vector_private(),
+                    &challenge
+                )
+                .is_err(),
+                "invalid sign-in parameters must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn apple_password_derivation_matches_pyicloud_reference_vectors() {
+        let password = b"correct horse battery staple";
+        let salt: Vec<u8> = (0..16).collect();
+
+        let s2k = derive_password(password, &salt, 1000, "s2k");
+        assert_eq!(
+            hex(s2k.as_ref()),
+            "6b7cc6edb94620dcf9811c616742ca428fe81b5bede8478a876a895345ded185"
+        );
+
+        let s2k_fo = derive_password(password, &salt, 1000, "s2k_fo");
+        assert_eq!(
+            hex(s2k_fo.as_ref()),
+            "5df3f8614930d6e2cf855fc8ddec13b51431c6c08e3375a1ef346686965d049e"
+        );
+
+        let inner = hash(&[b":", s2k_fo.as_ref()]);
+        assert_eq!(
+            hex(&hash(&[&salt, &inner])),
+            "42bb4a1784a729202320441ea9cb4866966552e000de056e690160dfad2266f4"
+        );
+    }
 }

@@ -3,12 +3,14 @@ name: Native Windows build
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
 concurrency:
   group: native-windows-${{ github.ref }}
-  cancel-in-progress: true
+  # A tag build becomes a release; never cancel one.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
@@ -46,9 +48,41 @@ jobs:
         with:
           workspaces: sidecar -> target
 
+      # The app version and the sidecar version are separate files that ship as
+      # one product, and the MSIX identity is derived from the csproj alone.
+      # Catch drift here rather than in a released package.
+      - name: Check versions agree
+        if: matrix.architecture == 'x64'
+        run: |
+          $csproj = [xml](Get-Content src-windows/Reminders.WinUI/Reminders.WinUI.csproj)
+          $app = ($csproj.Project.PropertyGroup.Version | Where-Object { $_ }).Trim()
+          $cargo = (Select-String -Path sidecar/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ($app -ne $cargo) {
+            throw "Version mismatch: csproj is $app but sidecar/Cargo.toml is $cargo."
+          }
+          if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
+            $tag = "${{ github.ref_name }}".TrimStart("v")
+            if ($tag -ne $app) {
+              throw "Tag v$tag does not match the app version $app. Bump the version and re-tag."
+            }
+          }
+          Write-Host "Version $app is consistent."
+
       - name: Test Rust backend
         if: matrix.architecture == 'x64'
         run: cargo test --release --locked --manifest-path sidecar/Cargo.toml
+
+      - name: Lint Rust backend
+        if: matrix.architecture == 'x64'
+        run: |
+          rustup component add clippy
+          cargo clippy --locked --all-targets --manifest-path sidecar/Cargo.toml -- -D warnings
+
+      - name: Audit Rust dependencies
+        if: matrix.architecture == 'x64'
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --file sidecar/Cargo.lock
 
       - name: Build Rust backend
         run: .\scripts\build-sidecar.ps1 -Architecture ${{ matrix.architecture }}
@@ -78,3 +112,45 @@ jobs:
             Reminders-for-Windows-${{ matrix.artifact }}.zip
             dist-msix/Reminders-for-Windows-${{ matrix.architecture }}.msix
           if-no-files-found: error
+
+  # Tagging v* publishes a draft release carrying both architectures. It is
+  # left as a draft on purpose: the MSIX is unsigned, so a human has to decide
+  # what to say about sideloading before anyone can install it. This replaces
+  # the tag-release path that shipped with the Tauri bundle; note that the
+  # in-app updater is gone, so existing installs will not upgrade themselves.
+  release:
+    name: Draft release
+    needs: windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Check both architectures are present
+        run: |
+          set -euo pipefail
+          for file in \
+            "Reminders-for-Windows-x64.zip" \
+            "Reminders-for-Windows-arm64.zip" \
+            "Reminders-for-Windows-x64.msix" \
+            "Reminders-for-Windows-ARM64.msix"; do
+            found=$(find artifacts -name "$file" -size +0c | head -1)
+            if [ -z "$found" ]; then
+              echo "Missing or empty artifact: $file" >&2
+              exit 1
+            fi
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.zip
+            artifacts/**/*.msix
+          fail_on_unmatched_files: true

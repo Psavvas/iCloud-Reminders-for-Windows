@@ -15,7 +15,7 @@ mod timeutil;
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use server::Server;
@@ -78,7 +78,11 @@ async fn run() -> error::Result<()> {
     });
     let server = Server::open(&data_dir, apple_id, tx.clone())?;
     server.start().await;
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    // Cap the reader itself rather than checking the length after the fact:
+    // `next_line` would otherwise buffer an unbounded line before we could
+    // reject it. One byte of headroom lets us detect an over-long line.
+    let stdin = tokio::io::stdin().take((MAX_PROTOCOL_LINE_BYTES + 1) as u64);
+    let mut lines = BufReader::new(stdin).lines();
     while let Some(line) = lines.next_line().await.map_err(|e| {
         error::AppError::internal("Could not read the command stream", e.to_string())
     })? {
@@ -87,7 +91,7 @@ async fn run() -> error::Result<()> {
         }
         if line.len() > MAX_PROTOCOL_LINE_BYTES {
             let _=tx.send(json!({"id":Value::Null,"ok":false,"error":{"code":"BAD_REQUEST","message":"request is too large","detail":""}}));
-            continue;
+            break;
         }
         let request: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
@@ -97,37 +101,49 @@ async fn run() -> error::Result<()> {
             }
         };
         let id = request.get("id").cloned().unwrap_or(Value::Null);
-        let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+        let method = request
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
         let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-        let result = server.dispatch(method, params).await;
-        let shutdown = result
-            .as_ref()
-            .ok()
-            .and_then(|v| v.get("shutdown"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let response = match result {
-            Ok(mut value) => {
-                if let Some(object) = value.as_object_mut() {
-                    object.remove("shutdown");
-                }
-                json!({"id":id,"ok":true,"result":value})
-            }
-            Err(error) => {
-                let mut body = serde_json::to_value(error.body())?;
-                if error.code() == "BAD_REQUEST"
-                    && body.get("detail").and_then(Value::as_str) == Some("NO_METHOD")
-                {
-                    body["code"] = json!("NO_METHOD");
-                    body["detail"] = json!("");
-                }
-                json!({"id":id,"ok":false,"error":body})
-            }
-        };
-        let _ = tx.send(response);
-        if shutdown {
+
+        // `shutdown` is answered inline so the reply is ordered before the
+        // loop exits. Everything else runs on its own task: the protocol is
+        // id-multiplexed and the client issues overlapping calls, so awaiting
+        // dispatch here would let one slow request (a sign-in can occupy the
+        // full 60s HTTP timeout) stall every later one, including `ping`.
+        if method == "shutdown" {
+            let _ = tx.send(json!({"id":id,"ok":true,"result":{"bye":true}}));
             break;
         }
+        let server = server.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let response = match server.dispatch(&method, params).await {
+                Ok(mut value) => {
+                    if let Some(object) = value.as_object_mut() {
+                        object.remove("shutdown");
+                    }
+                    json!({"id":id,"ok":true,"result":value})
+                }
+                Err(error) => {
+                    let code = error.code();
+                    let mut body = match serde_json::to_value(error.body()) {
+                        Ok(body) => body,
+                        Err(_) => json!({"code":"INTERNAL","message":"internal error","detail":""}),
+                    };
+                    if code == "BAD_REQUEST"
+                        && body.get("detail").and_then(Value::as_str) == Some("NO_METHOD")
+                    {
+                        body["code"] = json!("NO_METHOD");
+                        body["detail"] = json!("");
+                    }
+                    json!({"id":id,"ok":false,"error":body})
+                }
+            };
+            let _ = tx.send(response);
+        });
     }
     Ok(())
 }

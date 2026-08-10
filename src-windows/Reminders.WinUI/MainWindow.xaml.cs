@@ -254,7 +254,7 @@ public sealed partial class MainWindow : Window
         if (await dialog.ShowAsync() == ContentDialogResult.Primary)
         {
             SetGateState("Accepting terms…");
-            try { await _sidecar.CallAsync("login", new { apple_id = AppleIdBox.Text.Trim(), password = PasswordBox.Password, accept_terms = true }); await BootAsync(); }
+            try { await _sidecar.CallAsync("login", new { apple_id = AppleIdBox.Text.Trim(), password = PasswordBox.Password, accept_terms = true }); PasswordBox.Password = ""; await BootAsync(); }
             catch (Exception error) { ShowLogin(); GateError.Message = error.Message; GateError.IsOpen = true; }
         }
         else ShowLogin();

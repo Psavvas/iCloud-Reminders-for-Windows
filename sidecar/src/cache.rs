@@ -108,15 +108,27 @@ impl Cache {
     }
 
     pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        // Read into Option<String> so a NULL value reads as "absent". Rows
+        // written by older builds of `set_meta(key, None)` are NULL rather
+        // than deleted, and a bare String would fail the column-type check.
         self.conn()?
             .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
-                row.get(0)
+                row.get::<_, Option<String>>(0)
             })
             .optional()
+            .map(Option::flatten)
             .map_err(Into::into)
     }
 
     pub fn set_meta(&self, key: &str, value: Option<&str>) -> Result<()> {
+        // Clearing a key deletes the row. Storing NULL instead used to leave
+        // behind a row that `get_meta` could not read at all, which turned
+        // "sign out and purge" into a permanently failing sync cursor read.
+        let Some(value) = value else {
+            self.conn()?
+                .execute("DELETE FROM meta WHERE key = ?1", [key])?;
+            return Ok(());
+        };
         self.conn()?.execute(
             "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![key, value],
@@ -446,17 +458,15 @@ impl Cache {
             "print_group_by":"due", "print_include_notes":true,
             "print_include_completed":false, "remember_password":true, "sort_by":{}
         });
-        if let Some(raw) = self.get_meta("settings")? {
-            if let Ok(Value::Object(stored)) = serde_json::from_str::<Value>(&raw) {
-                if let Value::Object(defaults) = &mut settings {
+        if let Some(raw) = self.get_meta("settings")?
+            && let Ok(Value::Object(stored)) = serde_json::from_str::<Value>(&raw)
+                && let Value::Object(defaults) = &mut settings {
                     for (key, value) in stored {
                         if defaults.contains_key(&key) {
                             defaults.insert(key, value);
                         }
                     }
                 }
-            }
-        }
         Ok(settings)
     }
 
@@ -588,5 +598,285 @@ fn json_to_sql(value: &Value) -> SqlValue {
             .unwrap_or(SqlValue::Null),
         Value::String(value) => SqlValue::Text(value.clone()),
         other => SqlValue::Text(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cache, ReminderQuery};
+    use crate::model::{Reminder, ReminderList, Tag};
+    use serde_json::{Map, Value, json};
+
+    fn cache() -> (tempfile::TempDir, Cache) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = Cache::open(&dir.path().join("cache.db")).expect("open cache");
+        (dir, cache)
+    }
+
+    fn query<'a>() -> ReminderQuery<'a> {
+        ReminderQuery {
+            list_id: None,
+            tag: None,
+            scope: None,
+            include_completed: false,
+            search: None,
+            sort: None,
+            limit: 100,
+        }
+    }
+
+    fn reminder(id: &str, title: &str) -> Reminder {
+        Reminder {
+            id: id.into(),
+            list_id: "list-1".into(),
+            title: title.into(),
+            ..Reminder::default()
+        }
+    }
+
+    #[test]
+    fn meta_round_trips_and_clears() {
+        let (_dir, cache) = cache();
+        assert_eq!(cache.get_meta("apple_id").unwrap(), None);
+        cache.set_meta("apple_id", Some("someone@example.com")).unwrap();
+        assert_eq!(
+            cache.get_meta("apple_id").unwrap().as_deref(),
+            Some("someone@example.com")
+        );
+        cache.set_meta("apple_id", None).unwrap();
+        assert_eq!(cache.get_meta("apple_id").unwrap(), None);
+    }
+
+    #[test]
+    fn replace_lists_is_a_full_replacement() {
+        let (_dir, cache) = cache();
+        let list = |id: &str, title: &str| ReminderList {
+            id: id.into(),
+            title: title.into(),
+            ..ReminderList::default()
+        };
+        cache
+            .replace_lists(&[list("a", "Groceries"), list("b", "Work")])
+            .unwrap();
+        assert_eq!(cache.lists().unwrap().len(), 2);
+
+        cache.replace_lists(&[list("b", "Work renamed")]).unwrap();
+        let lists = cache.lists().unwrap();
+        assert_eq!(lists.len(), 1, "lists absent from the new set must be dropped");
+        assert_eq!(lists[0]["title"], json!("Work renamed"));
+    }
+
+    #[test]
+    fn completed_reminders_are_hidden_unless_requested() {
+        let (_dir, cache) = cache();
+        let mut done = reminder("r-done", "Finished");
+        done.completed = true;
+        cache
+            .upsert_reminders(&[reminder("r-open", "Open"), done])
+            .unwrap();
+
+        let visible = cache.reminders(query()).unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, "r-open");
+
+        let all = cache
+            .reminders(ReminderQuery { include_completed: true, ..query() })
+            .unwrap();
+        assert_eq!(all.len(), 2);
+
+        let completed = cache
+            .reminders(ReminderQuery { scope: Some("completed"), ..query() })
+            .unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].id, "r-done");
+    }
+
+    #[test]
+    fn deleted_reminders_only_appear_in_the_deleted_scope() {
+        let (_dir, cache) = cache();
+        let mut gone = reminder("r-gone", "Removed");
+        gone.deleted = true;
+        cache.upsert_reminders(&[reminder("r-live", "Here"), gone]).unwrap();
+
+        assert_eq!(cache.reminders(query()).unwrap().len(), 1);
+        let deleted = cache
+            .reminders(ReminderQuery { scope: Some("deleted"), ..query() })
+            .unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].id, "r-gone");
+    }
+
+    #[test]
+    fn search_matches_title_and_description() {
+        let (_dir, cache) = cache();
+        let mut noted = reminder("r-2", "Unrelated");
+        noted.description = "buy milk on the way".into();
+        cache.upsert_reminders(&[reminder("r-1", "Buy bread"), noted]).unwrap();
+
+        let hits = cache
+            .reminders(ReminderQuery { search: Some("buy"), ..query() })
+            .unwrap();
+        assert_eq!(hits.len(), 2, "search should cover title and description");
+
+        let single = cache
+            .reminders(ReminderQuery { search: Some("bread"), ..query() })
+            .unwrap();
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].id, "r-1");
+    }
+
+    #[test]
+    fn list_filter_scopes_results() {
+        let (_dir, cache) = cache();
+        let mut other = reminder("r-other", "Elsewhere");
+        other.list_id = "list-2".into();
+        cache.upsert_reminders(&[reminder("r-here", "Here"), other]).unwrap();
+
+        let scoped = cache
+            .reminders(ReminderQuery { list_id: Some("list-2"), ..query() })
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, "r-other");
+    }
+
+    #[test]
+    fn local_edits_mark_the_row_dirty_until_cleared() {
+        let (_dir, cache) = cache();
+        cache.upsert_reminders(&[reminder("r-1", "Before")]).unwrap();
+
+        let mut fields = Map::new();
+        fields.insert("title".into(), Value::String("After".into()));
+        cache.apply_local_edit("r-1", &fields).unwrap();
+
+        let stored = cache.reminder("r-1").unwrap().expect("reminder exists");
+        assert_eq!(stored.title, "After");
+
+        // A server echo must not clobber an edit that has not been pushed yet.
+        let mut echo = reminder("r-1", "Before");
+        echo.change_tag = Some("tag-1".into());
+        cache.upsert_reminders(&[echo]).unwrap();
+        assert_eq!(
+            cache.reminder("r-1").unwrap().unwrap().title,
+            "After",
+            "a dirty row must survive a remote upsert"
+        );
+
+        cache.clear_dirty("r-1", Some("tag-2")).unwrap();
+        let mut settled = reminder("r-1", "Server wins now");
+        settled.change_tag = Some("tag-3".into());
+        cache.upsert_reminders(&[settled]).unwrap();
+        assert_eq!(cache.reminder("r-1").unwrap().unwrap().title, "Server wins now");
+    }
+
+    #[test]
+    fn replace_id_moves_a_local_row_onto_its_server_identity() {
+        let (_dir, cache) = cache();
+        cache.insert_local_reminder(&reminder("local/abc", "Draft")).unwrap();
+        cache.replace_id("local/abc", "server/xyz").unwrap();
+
+        assert!(cache.reminder("local/abc").unwrap().is_none());
+        assert_eq!(cache.reminder("server/xyz").unwrap().unwrap().title, "Draft");
+    }
+
+    #[test]
+    fn outbox_is_first_in_first_out_and_drains() {
+        let (_dir, cache) = cache();
+        cache.enqueue("r-1", "create", &json!({"title":"one"}), None).unwrap();
+        cache.enqueue("r-2", "update", &json!({"title":"two"}), Some("tag")).unwrap();
+
+        let pending = cache.pending(10).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].reminder_id, "r-1");
+        assert_eq!(pending[0].op, "create");
+        assert_eq!(pending[1].base_tag.as_deref(), Some("tag"));
+
+        cache.dequeue(pending[0].seq).unwrap();
+        let left = cache.pending(10).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].reminder_id, "r-2");
+    }
+
+    #[test]
+    fn recorded_failures_count_attempts_without_dropping_the_item() {
+        let (_dir, cache) = cache();
+        cache.enqueue("r-1", "update", &json!({}), None).unwrap();
+        let seq = cache.pending(1).unwrap()[0].seq;
+
+        cache.record_failure(seq, "network unreachable").unwrap();
+        let pending = cache.pending(1).unwrap();
+        assert_eq!(pending.len(), 1, "a failed push must stay queued");
+        assert_eq!(pending[0].attempts, 1);
+    }
+
+    #[test]
+    fn conflicts_are_listed_until_resolved() {
+        let (_dir, cache) = cache();
+        cache.upsert_reminders(&[reminder("r-1", "Mine")]).unwrap();
+        cache
+            .record_conflict("r-1", &json!({"title":"Mine"}), &json!({"title":"Theirs"}))
+            .unwrap();
+
+        let open = cache.conflicts().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].remote["title"], json!("Theirs"));
+
+        cache.resolve_conflict(open[0].id).unwrap();
+        assert!(cache.conflicts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tags_are_replaced_per_reminder() {
+        let (_dir, cache) = cache();
+        cache.upsert_reminders(&[reminder("r-1", "Tagged")]).unwrap();
+        let tag = |id: &str, name: &str| Tag {
+            id: id.into(),
+            name: name.into(),
+            reminder_id: "r-1".into(),
+        };
+
+        cache.replace_tags_for("r-1", &[tag("t1", "home"), tag("t2", "urgent")]).unwrap();
+        assert_eq!(cache.all_tags().unwrap().len(), 2);
+
+        cache.replace_tags_for("r-1", &[tag("t1", "home")]).unwrap();
+        let tags = cache.all_tags().unwrap();
+        assert_eq!(tags.len(), 1, "tags dropped upstream must disappear locally");
+
+        let by_tag = cache
+            .reminders(ReminderQuery { tag: Some("home"), ..query() })
+            .unwrap();
+        assert_eq!(by_tag.len(), 1);
+    }
+
+    #[test]
+    fn settings_patch_merges_rather_than_replaces() {
+        let (_dir, cache) = cache();
+        let defaults = cache.settings().unwrap();
+        assert!(defaults.is_object(), "settings should always be an object");
+
+        let mut patch = Map::new();
+        patch.insert("sync_minutes".into(), json!(30));
+        cache.set_settings(&patch).unwrap();
+
+        let mut second = Map::new();
+        second.insert("remember_password".into(), json!(false));
+        let merged = cache.set_settings(&second).unwrap();
+
+        assert_eq!(merged["sync_minutes"], json!(30), "earlier keys must survive");
+        assert_eq!(merged["remember_password"], json!(false));
+    }
+
+    #[test]
+    fn due_reminders_are_reported_once() {
+        let (_dir, cache) = cache();
+        let mut due = reminder("r-due", "Ring me");
+        due.due_date = Some("2020-01-01T09:00:00Z".into());
+        cache.upsert_reminders(&[due]).unwrap();
+
+        let first = cache.due_unnotified("2020-01-02T00:00:00Z").unwrap();
+        assert_eq!(first.len(), 1);
+
+        cache.mark_notified(&["r-due".to_string()]).unwrap();
+        let second = cache.due_unnotified("2020-01-02T00:00:00Z").unwrap();
+        assert!(second.is_empty(), "a notified reminder must not fire again");
     }
 }
