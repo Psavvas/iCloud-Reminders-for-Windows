@@ -18,7 +18,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Version>0.3.0</Version>
     <Product>Reminders for Windows</Product>
-    <Authors>C Denihan; Paul Savvas</Authors>
+    <Authors>Paul Savvas</Authors>
     <Company>paulsavvas.com</Company>
     <Description>An independent native Windows client compatible with Apple iCloud Reminders.</Description>
     <PackageProjectUrl>https://paulsavvas.com</PackageProjectUrl>

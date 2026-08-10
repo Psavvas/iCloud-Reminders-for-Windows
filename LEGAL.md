@@ -1,7 +1,7 @@
 # Legal and service notice
 
 Reminders for Windows is an independent community project maintained by
-C Denihan and Paul Savvas and published under the `paulsavvas.com` identity.
+Paul Savvas and published under the `paulsavvas.com` identity.
 It is not authorized, sponsored, endorsed, or otherwise approved by Apple Inc.
 
 The names Apple and iCloud are used only to identify compatibility with Apple

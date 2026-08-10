@@ -142,7 +142,7 @@ docs/                          Setup, protocol and architecture notes
 
 ## Credits
 
-Maintained by C Denihan and Paul Savvas. Package publisher:
+Maintained by Paul Savvas. Package publisher:
 [paulsavvas.com](https://paulsavvas.com).
 
 Apple and iCloud are trademarks of Apple Inc., registered in the U.S. and other
