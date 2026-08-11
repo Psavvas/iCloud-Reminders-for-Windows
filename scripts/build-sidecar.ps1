@@ -46,8 +46,8 @@ try {
         Write-Host "Smoke-testing the JSON protocol..." -ForegroundColor Cyan
         $probeDir = Join-Path $env:TEMP "reminders-sync-buildcheck-$PID"
         try {
-            $probeOut = ('{"id":1,"method":"ping","params":{}}' | & $destination --data-dir $probeDir 2>&1 | Out-String)
-            if ($probeOut -notmatch '"pong":true') {
+            $probeOut = ('{"id":1,"method":"shutdown","params":{}}' | & $destination --data-dir $probeDir 2>&1 | Out-String)
+            if ($probeOut -notmatch '"bye":true') {
                 Write-Host $probeOut
                 throw "The Rust sidecar did not answer its protocol smoke test"
             }
