@@ -46,8 +46,12 @@ try {
         Write-Host "Smoke-testing the JSON protocol..." -ForegroundColor Cyan
         $probeDir = Join-Path $env:TEMP "reminders-sync-buildcheck-$PID"
         try {
-            $probeOut = ('{"id":1,"method":"shutdown","params":{}}' | & $destination --data-dir $probeDir 2>&1 | Out-String)
-            if ($probeOut -notmatch '"bye":true') {
+            # `ping` goes through the normal dispatch path, so this exercises
+            # more than `shutdown` does (which is answered inline). It was
+            # briefly flaky because a dispatched request could be dropped when
+            # stdin hit EOF; main.rs now drains in-flight work before exiting.
+            $probeOut = ('{"id":1,"method":"ping","params":{}}' | & $destination --data-dir $probeDir 2>&1 | Out-String)
+            if ($probeOut -notmatch '"pong":true') {
                 Write-Host $probeOut
                 throw "The Rust sidecar did not answer its protocol smoke test"
             }
