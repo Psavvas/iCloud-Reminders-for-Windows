@@ -75,6 +75,36 @@ ARM64 output is written to `dist-windows-arm64`. The ARM64 Rust target
 installed. The scripts report either missing prerequisite without installing
 anything.
 
+## Create an .exe installer
+
+This is the distribution format to reach for. It needs
+[Inno Setup 6](https://jrsoftware.org/isdl.php) —
+`winget install JRSoftware.InnoSetup`:
+
+```powershell
+.\scripts\build-installer.ps1 -Architecture x64
+.\scripts\build-installer.ps1 -Architecture ARM64
+```
+
+Installers are written to `dist-installer`. The install is per-user (into
+`%LOCALAPPDATA%\Programs`), so it raises no admin prompt, and it registers a
+normal entry in Apps & Features. Uninstalling leaves the reminder cache and
+settings in place; credentials stay in Windows Credential Manager and are never
+touched by the installer.
+
+An unsigned installer draws a SmartScreen warning on first run, which the user
+can dismiss via **More info** then **Run anyway**. This is the practical
+difference from MSIX below: an unsigned `.exe` installs, an unsigned MSIX does
+not. To sign it:
+
+```powershell
+.\scripts\build-installer.ps1 -Architecture x64 -CertificateThumbprint YOUR_THUMBPRINT
+```
+
+No certificate is generated or stored in this repository, and CI does not sign.
+Signing requires a key, and a key committed to a repository or handed to CI is a
+key that can sign anything in your name — see `SECURITY_AUDIT.md`.
+
 ## Create an MSIX package
 
 The package includes both the WinUI executable and architecture-matched Rust
@@ -86,9 +116,12 @@ sidecar:
 ```
 
 Packages are written to `dist-msix`. They are unsigned by default, which is
-appropriate for CI artifacts and Microsoft Store submission. To produce a
-sideloadable package, the manifest publisher must match a trusted code-signing
-certificate in the current user's certificate store:
+appropriate for Microsoft Store submission but **not installable as-is**:
+Windows shows "Publisher: Unknown" and disables the Install button. Use the
+`.exe` installer above for anything you intend to run.
+
+To produce a sideloadable package, the manifest publisher must match a trusted
+code-signing certificate in the current user's certificate store:
 
 ```powershell
 .\scripts\build-msix.ps1 -Architecture x64 -CertificateThumbprint YOUR_THUMBPRINT

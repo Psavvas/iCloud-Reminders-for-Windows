@@ -93,13 +93,39 @@ jobs:
       - name: Build unsigned MSIX
         run: .\scripts\build-msix.ps1 -Architecture ${{ matrix.architecture }} -SkipBuild
 
-      - name: Verify published process pair
+      # The .exe installer is the artifact users can actually install. An
+      # unsigned MSIX is refused outright by Windows -- the Install button is
+      # disabled -- whereas an unsigned .exe only draws a SmartScreen warning
+      # the user can dismiss. The MSIX is kept for a future signed or Store
+      # release.
+      - name: Install Inno Setup
         run: |
-          $app = Get-Item "${{ matrix.portable_dir }}/Reminders.exe"
-          $sidecar = Get-Item "${{ matrix.portable_dir }}/reminders-sidecar.exe"
-          $msix = Get-Item "dist-msix/Reminders-for-Windows-${{ matrix.architecture }}.msix"
-          if ($app.Length -eq 0 -or $sidecar.Length -eq 0 -or $msix.Length -eq 0) {
-            throw 'A published artifact is empty.'
+          if (-not (Get-Command ISCC.exe -ErrorAction SilentlyContinue) -and
+              -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed.' }
+          }
+          else {
+            Write-Host 'Inno Setup is already present on the runner.'
+          }
+
+      - name: Build installer
+        run: .\scripts\build-installer.ps1 -Architecture ${{ matrix.architecture }} -SkipBuild
+
+      - name: Verify published artifacts
+        run: |
+          $arch = "${{ matrix.architecture }}"
+          $lower = if ($arch -eq 'ARM64') { 'arm64' } else { 'x64' }
+          $expected = @(
+            "${{ matrix.portable_dir }}/Reminders.exe",
+            "${{ matrix.portable_dir }}/reminders-sidecar.exe",
+            "dist-msix/Reminders-for-Windows-$arch.msix",
+            "dist-installer/Reminders-for-Windows-$lower-Setup.exe"
+          )
+          foreach ($path in $expected) {
+            $item = Get-Item -LiteralPath $path -ErrorAction Stop
+            if ($item.Length -eq 0) { throw "Published artifact is empty: $path" }
+            Write-Host ("{0,-64} {1,10:N0} bytes" -f $item.Name, $item.Length)
           }
 
       - name: Package portable build
@@ -109,6 +135,7 @@ jobs:
         with:
           name: Reminders-for-Windows-${{ matrix.artifact }}-${{ github.sha }}
           path: |
+            dist-installer/Reminders-for-Windows-${{ matrix.artifact }}-Setup.exe
             Reminders-for-Windows-${{ matrix.artifact }}.zip
             dist-msix/Reminders-for-Windows-${{ matrix.architecture }}.msix
           if-no-files-found: error
@@ -135,6 +162,8 @@ jobs:
         run: |
           set -euo pipefail
           for file in \
+            "Reminders-for-Windows-x64-Setup.exe" \
+            "Reminders-for-Windows-arm64-Setup.exe" \
             "Reminders-for-Windows-x64.zip" \
             "Reminders-for-Windows-arm64.zip" \
             "Reminders-for-Windows-x64.msix" \
@@ -151,6 +180,23 @@ jobs:
           draft: true
           generate_release_notes: true
           files: |
+            artifacts/**/*-Setup.exe
             artifacts/**/*.zip
             artifacts/**/*.msix
           fail_on_unmatched_files: true
+          body: |
+            ## Installing
+
+            Download **Reminders-for-Windows-x64-Setup.exe** (or `arm64` on an
+            Arm device) and run it. It installs for the current user, so there
+            is no admin prompt.
+
+            These builds are not code-signed, so Windows SmartScreen will warn
+            the first time. Choose **More info**, then **Run anyway**.
+
+            Prefer not to install? `Reminders-for-Windows-x64.zip` is the same
+            application as a portable folder -- unzip it and run `Reminders.exe`.
+            Keep `Reminders.exe` and `reminders-sidecar.exe` together.
+
+            The `.msix` is for a future signed or Microsoft Store release.
+            Windows will not install it while it is unsigned.

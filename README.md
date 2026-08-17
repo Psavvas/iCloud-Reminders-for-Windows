@@ -67,17 +67,27 @@ The production build is a self-contained x64 folder under `dist-windows`.
 Keep that folder together because the native WinUI resources, Windows App SDK
 runtime files, application icon, and Rust sidecar are all required.
 
-ARM64 and MSIX are supported:
+To build an installer instead, with [Inno Setup 6](https://jrsoftware.org/isdl.php)
+installed:
+
+```powershell
+.\scripts\build-installer.ps1 -Architecture x64
+```
+
+That writes `dist-installer\Reminders-for-Windows-x64-Setup.exe`, which installs
+per-user with no admin prompt. ARM64 and MSIX are supported too:
 
 ```powershell
 .\scripts\build-windows.ps1 -Architecture ARM64
+.\scripts\build-installer.ps1 -Architecture ARM64
 .\scripts\build-msix.ps1 -Architecture x64
-.\scripts\build-msix.ps1 -Architecture ARM64
 ```
 
-ARM64 portable output is written to `dist-windows-arm64`; packages are written
-to `dist-msix`. MSIX files are unsigned unless a certificate thumbprint is
-provided. See the getting-started guide for signing and Store identity options.
+ARM64 portable output is written to `dist-windows-arm64` and MSIX packages to
+`dist-msix`. Both the installer and the MSIX are unsigned unless a certificate
+thumbprint is provided — but an unsigned installer still installs after a
+SmartScreen prompt, whereas Windows refuses an unsigned MSIX outright. See the
+getting-started guide for signing and Store identity options.
 
 ## What works
 
