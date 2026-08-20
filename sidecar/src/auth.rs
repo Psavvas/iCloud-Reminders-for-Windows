@@ -120,10 +120,24 @@ pub struct AuthClient {
     /// `SessionState`: it belongs to one challenge, and a challenge does not
     /// survive the process that opened it.
     route: TwoFactorRoute,
-    /// Trusted phone numbers Apple named on the current challenge, so falling
-    /// back to a text does not cost another round trip.
+    /// Trusted phone numbers Apple named on the current challenge, so asking for
+    /// a text does not cost another round trip.
     phones: Vec<TrustedPhone>,
     trusted_device_count: i64,
+    /// Routes a code has actually gone out on for the current challenge.
+    ///
+    /// Needed because a user can end up holding two live codes -- a device
+    /// prompt and a text -- and the endpoint that accepts one refuses the other.
+    /// Knowing which codes are genuinely in play is what lets a verification
+    /// retry on the other route without spending a failed attempt on a route
+    /// that never sent anything.
+    sent_on: Vec<TwoFactorRoute>,
+    /// Apple's own words about the outstanding challenge, when it offered any.
+    notice: Option<String>,
+    /// Whether the options endpoint has already been asked about this challenge.
+    /// Without this, an account with no phone number re-fetches them on every
+    /// attempt to text a code that was never going to be possible.
+    options_loaded: bool,
 }
 
 impl AuthClient {
@@ -147,6 +161,9 @@ impl AuthClient {
             route: TwoFactorRoute::Unknown,
             phones: Vec::new(),
             trusted_device_count: 0,
+            sent_on: Vec::new(),
+            notice: None,
+            options_loaded: false,
         })
     }
 
@@ -160,7 +177,24 @@ impl AuthClient {
                 .map(|phone| phone.masked.clone()),
             _ => None,
         };
-        json!({"method": self.route.name(), "number": masked})
+        json!({
+            "method": self.route.name(),
+            "number": masked,
+            "notice": self.notice,
+            // Whether offering "text me instead" would lead anywhere.
+            "can_sms": !self.phones.is_empty(),
+            // Whether a code has actually gone out yet. The gate asks for one
+            // when it has not, and leaves well alone when it has -- reopening
+            // the window must not mint a code that retires the one in hand.
+            "sent": !self.sent_on.is_empty(),
+        })
+    }
+
+    fn mark_sent(&mut self, route: TwoFactorRoute) {
+        if !self.sent_on.contains(&route) {
+            self.sent_on.push(route.clone());
+        }
+        self.route = route;
     }
 
     pub fn http(&self) -> &reqwest::Client {
@@ -267,7 +301,21 @@ impl AuthClient {
                 self.route = TwoFactorRoute::Unknown;
                 self.phones.clear();
                 self.trusted_device_count = 0;
+                self.sent_on.clear();
+                self.notice = None;
+                self.options_loaded = false;
                 self.note_auth_options(&body);
+                // Fix the route now, so a code is verified against the right
+                // endpoint even if nothing else gets a say. Deliberately *not*
+                // recorded as sent: whether Apple pushes the device code with
+                // this response or only when asked is not something this code
+                // can observe, so the caller requests one and the request is
+                // harmless if Apple had already pushed -- it is the same
+                // challenge, not a new code.
+                if self.trusted_device_count > 0 || self.phones.is_empty() {
+                    self.route = TwoFactorRoute::TrustedDevice;
+                }
+                self.notice = apple_message(&body);
             }
             return Err(error);
         }
@@ -374,39 +422,48 @@ impl AuthClient {
     /// number got a failure that the sign-in screen swallowed, and then no code
     /// it could ever accept.
     pub async fn request_2fa(&mut self) -> Result<Value> {
-        if self.trusted_device_count > 0 || self.phones.is_empty() {
-            let response = self
-                .http
-                .get(format!("{IDMSA}/verify/trusteddevice"))
-                .headers(self.idmsa_headers()?)
-                .send()
-                .await?;
-            self.capture_headers(response.headers());
-            let status = response.status();
-            let body = bounded_response_text(response).await?;
-            if status.is_success() {
-                self.route = TwoFactorRoute::TrustedDevice;
-                return Ok(json!({"sent":true,"method":"trusted_device","number":Value::Null}));
-            }
-            // Apple names the phones it will text on the way past. Keep them:
-            // the retry below is the only chance this account has.
-            self.note_auth_options(&body);
-            if self.phones.is_empty() {
-                self.load_auth_options().await?;
-            }
+        // No device to push to means the phone is the only route there is.
+        if self.trusted_device_count == 0 && !self.phones.is_empty() {
+            return self.request_sms_code().await;
         }
-        self.request_sms_code().await
+        let response = self
+            .http
+            .get(format!("{IDMSA}/verify/trusteddevice"))
+            .headers(self.idmsa_headers()?)
+            .send()
+            .await?;
+        self.capture_headers(response.headers());
+        let status = response.status();
+        let body = bounded_response_text(response).await?;
+        self.note_auth_options(&body);
+        self.settle_delivery(status.as_u16(), &body, "trusted device")?;
+        self.mark_sent(TwoFactorRoute::TrustedDevice);
+        Ok(json!({
+            "sent": true,
+            "method": "trusted_device",
+            "number": Value::Null,
+            "notice": self.notice,
+            "can_sms": !self.phones.is_empty(),
+        }))
     }
 
-    /// Ask Apple to text the code instead.
-    async fn request_sms_code(&mut self) -> Result<Value> {
+    /// Ask Apple to text the code instead. Only ever on the user's say-so.
+    ///
+    /// This used to run automatically whenever the trusted-device request looked
+    /// like it had failed, which cost people a text they had not asked for, a
+    /// second one when they tried again, and -- because the route decides which
+    /// endpoint verifies the code -- a rejection for every code they then typed.
+    pub async fn request_sms_code(&mut self) -> Result<Value> {
+        if self.phones.is_empty() && !self.options_loaded {
+            self.load_auth_options().await?;
+        }
         let phone = self
             .phones
             .first()
             .cloned()
             .ok_or_else(|| AppError::AuthRequired {
-                message: "Apple has no trusted device or phone number for this account, \
-                          so it cannot send a verification code. Add one at appleid.apple.com."
+                message: "Apple has no trusted phone number for this account, so it \
+                          cannot text you a code. Add one at appleid.apple.com."
                     .into(),
                 detail: String::new(),
             })?;
@@ -425,14 +482,49 @@ impl AuthClient {
         self.capture_headers(response.headers());
         let status = response.status();
         let body = bounded_response_text(response).await?;
-        if !status.is_success() {
-            return Err(AppError::TwoFactorRequired {
-                message: "Apple would not send a verification code.".into(),
-                detail: safe_detail(&body),
+        self.settle_delivery(status.as_u16(), &body, "sms")?;
+        self.mark_sent(TwoFactorRoute::Sms(phone.id, mode));
+        Ok(json!({
+            "sent": true,
+            "method": "sms",
+            "number": phone.masked,
+            "notice": self.notice,
+            "can_sms": true,
+        }))
+    }
+
+    /// Decide whether a delivery request actually failed.
+    ///
+    /// Not from the status code, which is what the first attempt at this got
+    /// wrong. Apple answers these endpoints with a non-2xx *and sends the code
+    /// anyway* -- the session is still unauthenticated, and it says so, which is
+    /// not the same as refusing. Reporting that as "Apple would not send a
+    /// verification code" produced the worst possible outcome: a user staring at
+    /// a code on their phone next to an error saying none was sent, asking again,
+    /// and collecting a second live code that retired the first.
+    ///
+    /// So only a session that is genuinely no longer usable counts as a failure.
+    /// Everything else is reported as sent, with Apple's own words carried
+    /// through when it offered any -- "Enter the verification code displayed on
+    /// your other devices" is better copy than anything invented here.
+    fn settle_delivery(&mut self, status: u16, body: &str, route: &str) -> Result<()> {
+        self.notice = apple_message(body);
+        // Logged so this is diagnosable from the app log rather than guessed at:
+        // Apple's exact status for these endpoints is not documented anywhere.
+        eprintln!(
+            "2fa: {route} delivery returned HTTP {status}{}",
+            self.notice
+                .as_deref()
+                .map(|note| format!(" ({note})"))
+                .unwrap_or_default()
+        );
+        if matches!(status, 401 | 403 | 421) {
+            return Err(AppError::AuthRequired {
+                message: "That sign-in attempt has expired. Enter your password again.".into(),
+                detail: safe_detail(body),
             });
         }
-        self.route = TwoFactorRoute::Sms(phone.id, mode);
-        Ok(json!({"sent":true,"method":"sms","number":phone.masked}))
+        Ok(())
     }
 
     /// Fetch the challenge options when the sign-in response did not carry them.
@@ -445,6 +537,7 @@ impl AuthClient {
             .await?;
         self.capture_headers(response.headers());
         let body = bounded_response_text(response).await?;
+        self.options_loaded = true;
         self.note_auth_options(&body);
         Ok(())
     }
@@ -500,7 +593,69 @@ impl AuthClient {
         // endpoint refuses a texted code, and Apple's refusal looks exactly like
         // a mistyped one -- so guessing here is how a correct code gets called
         // wrong.
-        let (url, body) = match &self.route {
+        //
+        // Where a code has genuinely gone out on both routes -- someone asked
+        // for a text while a device prompt was still on screen -- the one they
+        // typed is a real code whichever it was, so the other route is tried
+        // before anyone is told their digits were wrong. Only routes that
+        // actually sent something are tried: spending a failed attempt on a
+        // route with no code in play would just walk the account towards a
+        // lockout.
+        let mut routes = vec![self.current_route()];
+        for route in self.sent_on.clone() {
+            if !routes.contains(&route) {
+                routes.push(route);
+            }
+        }
+
+        for (index, route) in routes.iter().enumerate() {
+            let (status, text) = self.post_code(route, code).await?;
+            if status.is_success() {
+                self.route = route.clone();
+                break;
+            }
+            eprintln!(
+                "2fa: {} verification returned HTTP {}",
+                route.name(),
+                status.as_u16()
+            );
+            // Apple naming the digits as wrong is definitive -- no other route
+            // would have taken them either -- and the last route is the last
+            // chance regardless.
+            if is_wrong_code(&text) || index + 1 == routes.len() {
+                return Err(classify_code_rejection(status.as_u16(), &text));
+            }
+        }
+        let trust = self
+            .http
+            .get(format!("{IDMSA}/2sv/trust"))
+            .headers(self.idmsa_headers()?)
+            .send()
+            .await?;
+        self.capture_headers(trust.headers());
+        self.state.trusted_session = trust.status().is_success();
+        // The challenge is spent; nothing about it should outlive it.
+        self.route = TwoFactorRoute::Unknown;
+        self.sent_on.clear();
+        self.notice = None;
+        self.account_login().await
+    }
+
+    /// The route to try first: whatever a code last went out on.
+    fn current_route(&self) -> TwoFactorRoute {
+        match &self.route {
+            TwoFactorRoute::Unknown => TwoFactorRoute::TrustedDevice,
+            other => other.clone(),
+        }
+    }
+
+    /// Submit a code to one route's verifier, capturing Apple's rotated headers.
+    async fn post_code(
+        &mut self,
+        route: &TwoFactorRoute,
+        code: &str,
+    ) -> Result<(reqwest::StatusCode, String)> {
+        let (url, body) = match route {
             TwoFactorRoute::Sms(id, mode) => (
                 format!("{IDMSA}/verify/phone/securitycode"),
                 json!({"phoneNumber":{"id":id},"securityCode":{"code":code},"mode":mode}),
@@ -517,24 +672,13 @@ impl AuthClient {
             .json(&body)
             .send()
             .await?;
-        // Apple issues a fresh scnt here too. Without this the trust call below
-        // echoes a stale one, fails, and a correct code ends as a failed sign-in.
+        // Apple issues a fresh scnt here too. Without this the trust call that
+        // follows echoes a stale one, fails, and a correct code ends as a failed
+        // sign-in.
         self.capture_headers(response.headers());
         let status = response.status();
         let text = bounded_response_text(response).await?;
-        if !status.is_success() {
-            return Err(classify_code_rejection(status.as_u16(), &text));
-        }
-        let trust = self
-            .http
-            .get(format!("{IDMSA}/2sv/trust"))
-            .headers(self.idmsa_headers()?)
-            .send()
-            .await?;
-        self.capture_headers(trust.headers());
-        self.state.trusted_session = trust.status().is_success();
-        self.route = TwoFactorRoute::Unknown;
-        self.account_login().await
+        Ok((status, text))
     }
 
     fn idmsa_headers(&self) -> Result<HeaderMap> {
@@ -831,31 +975,70 @@ fn classify_auth(status: u16, body: &str) -> AppError {
     }
 }
 
-/// Tell a mistyped code apart from a challenge that is no longer valid.
+/// Apple's own explanation of a response, when it gave one.
 ///
-/// Both used to surface as "That code was rejected", which is a dead end when
-/// the truth is that the code went stale: there is no six digits the user could
-/// have typed, and nothing in the message says to ask for a new one. Apple's
-/// -21669 is the one that genuinely means the digits were wrong.
-fn classify_code_rejection(status: u16, body: &str) -> AppError {
-    let detail = safe_detail(body);
-    let wrong_code = serde_json::from_str::<Value>(body).is_ok_and(|value| {
+/// Preferred over anything invented here: "Incorrect verification code." and
+/// "Enter the verification code displayed on your other devices." are both
+/// better copy than a guess made from a status code, and both are Apple's, so
+/// they stay right when Apple changes its mind.
+fn apple_message(body: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(body).ok()?;
+    for pointer in [
+        "/service_errors/0/message",
+        "/serviceErrors/0/message",
+        "/errorMessage",
+    ] {
+        if let Some(text) = value.pointer(pointer).and_then(Value::as_str) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.chars().take(300).collect());
+            }
+        }
+    }
+    None
+}
+
+/// Whether Apple said, in as many words, that the digits were wrong.
+///
+/// -21669 is the only definite answer. Everything else can also mean the code
+/// was fine and something about the challenge was not, so it must not be the
+/// grounds for telling someone they mistyped.
+fn is_wrong_code(body: &str) -> bool {
+    serde_json::from_str::<Value>(body).is_ok_and(|value| {
         value
             .pointer("/service_errors/0/code")
             .or_else(|| value.pointer("/serviceErrors/0/code"))
             .and_then(Value::as_str)
             == Some("-21669")
-    });
-    if wrong_code || status == 400 {
+    })
+}
+
+/// Turn a refused code into something the user can act on.
+///
+/// The earlier version guessed from the status code and told people their code
+/// had expired when the real problem was that it was being checked against the
+/// wrong endpoint. Apple's own message goes first now; the fallbacks only cover
+/// the case where it did not send one.
+fn classify_code_rejection(status: u16, body: &str) -> AppError {
+    let detail = safe_detail(body);
+    if is_wrong_code(body) {
         return AppError::TwoFactorRequired {
-            message: "Apple rejected that code. Check the six digits, or ask for a new code."
+            message: "Incorrect verification code. Check the six digits, or ask for a new code."
                 .into(),
             detail,
         };
     }
+    if let Some(message) = apple_message(body) {
+        return AppError::TwoFactorRequired {
+            message: format!("{message} If that code was right, ask for a new one."),
+            detail,
+        };
+    }
     AppError::TwoFactorRequired {
-        message: "That code is no longer valid. Ask for a new one and enter that instead."
-            .into(),
+        message: format!(
+            "Apple would not accept that code (HTTP {status}). Ask for a new one and \
+             enter that instead."
+        ),
         detail,
     }
 }
@@ -1046,42 +1229,8 @@ mod tests {
 
 #[cfg(test)]
 mod two_factor_tests {
-    use super::{AuthClient, TwoFactorRoute, classify_code_rejection};
+    use super::{AuthClient, TwoFactorRoute, classify_code_rejection, is_wrong_code};
     use crate::error::AppError;
-
-    #[test]
-    fn a_wrong_code_is_reported_as_a_wrong_code() {
-        let error = classify_code_rejection(
-            400,
-            r#"{"service_errors":[{"code":"-21669","message":"Incorrect verification code."}]}"#,
-        );
-        let AppError::TwoFactorRequired { message, .. } = error else {
-            panic!("a refused code is still a 2FA problem");
-        };
-        assert!(message.contains("rejected that code"), "{message}");
-    }
-
-    #[test]
-    fn a_stale_challenge_says_to_ask_for_a_new_code() {
-        // The dead end the old code created: "That code was rejected" when in
-        // fact no six digits would have worked, and nothing said to ask again.
-        let error = classify_code_rejection(401, r#"{"errorMessage":"session expired"}"#);
-        let AppError::TwoFactorRequired { message, .. } = error else {
-            panic!("the user still needs to enter a code");
-        };
-        assert!(message.contains("no longer valid"), "{message}");
-    }
-
-    #[test]
-    fn a_rejection_never_echoes_apples_raw_body() {
-        // Every other error path runs through safe_detail. This one used to
-        // hand the whole response through to the UI.
-        let error = classify_code_rejection(400, r#"{"secret":"do not surface","x":1}"#);
-        let AppError::TwoFactorRequired { detail, .. } = error else {
-            panic!("wrong variant");
-        };
-        assert!(!detail.contains("do not surface"), "{detail}");
-    }
 
     #[test]
     fn the_challenge_options_name_where_a_code_can_be_sent() {
@@ -1119,18 +1268,178 @@ mod two_factor_tests {
     }
 
     #[tokio::test]
-    async fn an_account_with_nowhere_to_send_a_code_says_so() {
-        // Neither a trusted device nor a phone number. "That code was rejected"
-        // would be a lie: no code is ever coming.
+    async fn an_account_with_nowhere_to_text_says_so() {
+        // No phone number at all. Reported as something only the user can fix,
+        // rather than as a code problem.
         let mut auth = client();
+        auth.trusted_device_count = 1;
+        auth.options_loaded = true; // Apple already told us: no phone numbers.
         let error = auth
             .request_sms_code()
             .await
-            .expect_err("there is nowhere to send a code");
+            .expect_err("there is nowhere to text a code");
         let AppError::AuthRequired { message, .. } = error else {
             panic!("this is not something a code can fix");
         };
         assert!(message.contains("appleid.apple.com"), "{message}");
+    }
+
+    // -- delivery is not judged by the status code -------------------------
+    //
+    // Reported from a real account: "when I ask for a code I get an Apple
+    // refused to send error but I still get the prompt on my phone... I also
+    // got two text messages with verification codes".
+    //
+    // Every part of that is one mistake. Apple answers these endpoints with a
+    // non-2xx and sends the code anyway -- the session is still unauthenticated
+    // and it says so, which is not a refusal. Treating it as one raised an error
+    // next to a code that had genuinely arrived, sent a text nobody asked for,
+    // sent a second one when the user tried again, and left the route wrong so
+    // that every code they then typed was checked against the wrong endpoint.
+
+    #[test]
+    fn a_non_2xx_delivery_response_is_not_a_refusal() {
+        let mut auth = client();
+        let body = r#"{"service_errors":[{"code":"-21421",
+                       "message":"Enter the verification code displayed on your other devices."}]}"#;
+        auth.settle_delivery(412, body, "trusted device")
+            .expect("Apple sent the code; this is not a failure");
+        assert_eq!(
+            auth.notice.as_deref(),
+            Some("Enter the verification code displayed on your other devices.")
+        );
+    }
+
+    #[test]
+    fn a_dead_sign_in_attempt_is_still_reported() {
+        // The counterweight: a session Apple has finished with cannot deliver
+        // anything, and no amount of waiting for a code will help.
+        let mut auth = client();
+        let error = auth
+            .settle_delivery(401, "{}", "trusted device")
+            .expect_err("this session is gone");
+        assert!(matches!(error, AppError::AuthRequired { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_text_is_never_sent_unless_it_was_asked_for() {
+        // The automatic fallback is gone. `request_2fa` on an account with a
+        // trusted device must not reach for the phone, whatever Apple answered.
+        let mut auth = client();
+        auth.trusted_device_count = 2;
+        auth.note_auth_options(r#"{"trustedPhoneNumbers":[{"id":2,"pushMode":"sms"}]}"#);
+
+        // No network here, so the call fails -- but the assertion is about which
+        // route it committed to, which is decided before any request goes out.
+        let _ = auth.request_2fa().await;
+        assert!(
+            !auth.sent_on.iter().any(|route| matches!(route, TwoFactorRoute::Sms(..))),
+            "a text must only ever follow the user asking for one"
+        );
+    }
+
+    #[test]
+    fn a_fresh_challenge_has_a_route_but_no_code_yet() {
+        // Whether Apple pushes the device code with the response that demands
+        // one, or only when asked, is not observable from here. So the route is
+        // fixed -- a code must be verified against the right endpoint -- but
+        // nothing claims a code has gone out, and the gate asks for one. If
+        // Apple had already pushed, that request re-serves the same challenge
+        // rather than minting a second code.
+        let mut auth = client();
+        auth.note_auth_options(r#"{"trustedDeviceCount":2}"#);
+        auth.route = TwoFactorRoute::TrustedDevice;
+
+        assert_eq!(auth.current_route(), TwoFactorRoute::TrustedDevice);
+        assert!(auth.sent_on.is_empty());
+        assert_eq!(auth.two_factor_status()["sent"], false);
+    }
+
+    #[test]
+    fn a_delivered_code_is_not_replaced_by_reopening_the_window() {
+        let mut auth = client();
+        auth.mark_sent(TwoFactorRoute::TrustedDevice);
+        assert_eq!(auth.two_factor_status()["sent"], true);
+    }
+
+    // -- verification ------------------------------------------------------
+
+    #[test]
+    fn apples_own_words_are_what_the_user_is_told() {
+        let error = classify_code_rejection(
+            412,
+            r#"{"service_errors":[{"code":"-21420","message":"This code has expired."}]}"#,
+        );
+        let AppError::TwoFactorRequired { message, .. } = error else {
+            panic!("wrong variant");
+        };
+        assert!(message.starts_with("This code has expired."), "{message}");
+    }
+
+    #[test]
+    fn a_wrong_code_is_named_as_one() {
+        let error = classify_code_rejection(
+            400,
+            r#"{"service_errors":[{"code":"-21669","message":"Incorrect verification code."}]}"#,
+        );
+        let AppError::TwoFactorRequired { message, .. } = error else {
+            panic!("wrong variant");
+        };
+        assert!(message.starts_with("Incorrect verification code."), "{message}");
+        assert!(is_wrong_code(
+            r#"{"service_errors":[{"code":"-21669"}]}"#
+        ));
+    }
+
+    #[test]
+    fn only_minus_21669_counts_as_a_typing_mistake() {
+        // Anything else can also mean the code was fine and the challenge was
+        // not, so it must not be grounds for blaming the user -- and it is what
+        // decides whether the other route is worth trying.
+        assert!(!is_wrong_code(r#"{"service_errors":[{"code":"-21420"}]}"#));
+        assert!(!is_wrong_code("not json"));
+        assert!(!is_wrong_code("{}"));
+    }
+
+    #[test]
+    fn a_status_only_rejection_still_says_what_to_do() {
+        let error = classify_code_rejection(500, "");
+        let AppError::TwoFactorRequired { message, .. } = error else {
+            panic!("wrong variant");
+        };
+        assert!(message.contains("Ask for a new one"), "{message}");
+    }
+
+    #[test]
+    fn a_rejection_never_echoes_apples_raw_body_as_detail() {
+        let error = classify_code_rejection(400, r#"{"secret":"do not surface","x":1}"#);
+        let AppError::TwoFactorRequired { detail, .. } = error else {
+            panic!("wrong variant");
+        };
+        assert!(!detail.contains("do not surface"), "{detail}");
+    }
+
+    #[test]
+    fn both_live_codes_are_tried_before_anyone_is_blamed() {
+        // Someone asks for a text while the device prompt is still on screen,
+        // then types whichever arrived first. Both are real codes, so both
+        // routes are worth a try -- but only the routes that actually sent one.
+        let mut auth = client();
+        auth.note_auth_options(r#"{"trustedPhoneNumbers":[{"id":2,"pushMode":"sms"}]}"#);
+        auth.mark_sent(TwoFactorRoute::TrustedDevice);
+        auth.mark_sent(TwoFactorRoute::Sms(2, "sms".into()));
+
+        assert_eq!(auth.current_route(), TwoFactorRoute::Sms(2, "sms".into()));
+        assert_eq!(auth.sent_on.len(), 2);
+    }
+
+    #[test]
+    fn a_route_that_never_sent_a_code_is_not_tried() {
+        // Spending a failed attempt on a route with no code in play walks the
+        // account towards a lockout for nothing.
+        let mut auth = client();
+        auth.mark_sent(TwoFactorRoute::TrustedDevice);
+        assert_eq!(auth.sent_on, vec![TwoFactorRoute::TrustedDevice]);
     }
 
     #[test]

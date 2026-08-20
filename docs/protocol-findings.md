@@ -38,13 +38,33 @@ define the behavior the native Rust connector must preserve.
   `PUT verify/phone` and validated at `POST verify/phone/securitycode`. Sending
   on one route and validating on the other is rejected, again exactly as a wrong
   code is. An account with no trusted device only has the phone route.
-- A genuinely mistyped code comes back as `serviceErrors[0].code == "-21669"`.
-  Other failures mean the challenge itself is no longer usable, and the only way
-  forward is a fresh code -- so they must not be reported as a typing mistake.
-- Re-requesting a code retires the previous one. Ask exactly once per challenge,
-  and only again when the user asks for a new code.
+- **Both delivery endpoints answer with a non-2xx status and send the code
+  anyway.** Observed on a live account: the app reported "Apple would not send a
+  verification code" while the prompt was on the user's phone and two texts had
+  arrived. The session is still unauthenticated at that point and Apple says so;
+  that is not a refusal. Never infer "no code was sent" from the status of these
+  two requests -- only a dead session (401/403/421) is a real failure.
+- Only `service_errors[0].code == "-21669"` means the digits were wrong. Every
+  other refusal is ambiguous -- it can equally mean the code was fine and the
+  challenge or the route was not -- so it must not be reported as a typing
+  mistake, and it is the signal that another route is worth trying.
+- Apple's own `service_errors[0].message` is user-grade text ("Incorrect
+  verification code.", "Enter the verification code displayed on your other
+  devices."). Prefer it over anything inferred from a status code.
+- Requesting a *text* mints a new code and retires the previous one, so a text
+  must only ever follow the user asking for one. Re-requesting the trusted-device
+  push re-serves the same challenge and is safe.
+- Whether the 409 pushes the device code on its own is not observable from the
+  client, so the app requests one and tracks which routes have actually
+  delivered. That also means a user can legitimately hold two live codes at
+  once, and verification tries every route that sent one before blaming the
+  typing.
 - Rebuilding the session re-runs SRP and voids any outstanding challenge. The
   background sync must not do that while a code is in flight.
+- The exact statuses Apple returns here are undocumented and were guessed wrong
+  once already. The sidecar logs them (`2fa: ... returned HTTP ...`) to stderr,
+  which the app captures into
+  `%LOCALAPPDATA%\RemindersSync\logs\app.log` -- read that before theorising.
 
 The authentication and record formats need live Windows/account validation
 whenever Apple changes the private service. Tests must use a dedicated account

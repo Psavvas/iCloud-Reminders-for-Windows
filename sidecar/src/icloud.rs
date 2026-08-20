@@ -194,8 +194,13 @@ impl ICloudClient {
         self.connected = false;
         self.pending_2fa = false;
     }
-    pub async fn request_2fa(&mut self) -> Result<Value> {
-        self.auth.request_2fa().await
+    /// Ask Apple for a code. `sms` is the user explicitly choosing a text.
+    pub async fn request_2fa(&mut self, sms: bool) -> Result<Value> {
+        if sms {
+            self.auth.request_sms_code().await
+        } else {
+            self.auth.request_2fa().await
+        }
     }
     pub async fn submit_2fa(&mut self, code: &str) -> Result<Value> {
         self.auth.submit_2fa(code).await?;

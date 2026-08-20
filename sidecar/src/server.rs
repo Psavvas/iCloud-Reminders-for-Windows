@@ -136,7 +136,11 @@ impl Server {
                 // decides whether the screen should say "your iPhone" or "your
                 // texts", and a user cannot type a code they are looking past.
                 let mut client = self.client.lock().await;
-                let sent = client.request_2fa().await?;
+                // "sms" is the user choosing a text, never the app deciding for
+                // them: a text they did not ask for retires the code already on
+                // their phone.
+                let sms = object.get("method").and_then(Value::as_str) == Some("sms");
+                let sent = client.request_2fa(sms).await?;
                 self.set_auth_snapshot(client.status());
                 Ok(sent)
             }

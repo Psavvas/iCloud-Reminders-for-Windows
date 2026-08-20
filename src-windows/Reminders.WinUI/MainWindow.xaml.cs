@@ -102,7 +102,7 @@ public sealed partial class MainWindow : Window
                 // Apple has a code outstanding. Asking for the password again is
                 // both wrong and destructive: signing in afresh makes Apple mint
                 // a new code and retire the one already sent.
-                ShowCodeEntry(status.Property("two_factor"));
+                await ShowCodeEntryAsync(status.Property("two_factor"));
                 return;
             }
             if (status.Flag("authenticated") || status.Flag("has_cache"))
@@ -278,6 +278,8 @@ public sealed partial class MainWindow : Window
 
     private async void ResendCode_Click(object sender, RoutedEventArgs e) => await RequestCodeAsync();
 
+    private async void TextCode_Click(object sender, RoutedEventArgs e) => await RequestCodeAsync("sms");
+
     /// <summary>
     /// Ask Apple to send a verification code, and say where it went.
     /// </summary>
@@ -288,9 +290,10 @@ public sealed partial class MainWindow : Window
     /// dead end. It also matters *where* the code went: "the code sent to your
     /// Apple devices" is useless to someone whose code arrived by text.
     /// </remarks>
-    private async Task RequestCodeAsync()
+    private async Task RequestCodeAsync(string? method = null)
     {
         ResendCode.IsEnabled = false;
+        TextCode.IsEnabled = false;
         GateError.IsOpen = false;
         GateProgress.Visibility = Visibility.Collapsed;
         LoginFields.Visibility = Visibility.Collapsed;
@@ -298,8 +301,8 @@ public sealed partial class MainWindow : Window
         CodeBox.Text = "";
         try
         {
-            var sent = await _sidecar.CallAsync("request_2fa", new { });
-            GateStatus.Text = DeliveryMessage(sent);
+            var sent = await _sidecar.CallAsync("request_2fa", new { method });
+            ShowCodeEntry(sent);
         }
         catch (Exception error)
         {
@@ -307,9 +310,10 @@ public sealed partial class MainWindow : Window
             GateError.Message = error.Message;
             GateError.IsOpen = true;
         }
-        finally { ResendCode.IsEnabled = true; }
+        finally { ResendCode.IsEnabled = true; TextCode.IsEnabled = true; }
     }
 
+    /// Draw the code box for a challenge. Pure UI -- asks Apple for nothing.
     private void ShowCodeEntry(JsonElement twoFactor)
     {
         AuthGate.Visibility = Visibility.Visible;
@@ -317,16 +321,43 @@ public sealed partial class MainWindow : Window
         LoginFields.Visibility = Visibility.Collapsed;
         CodeFields.Visibility = Visibility.Visible;
         GateStatus.Text = DeliveryMessage(twoFactor);
+        // Offered only while Apple has a number to text, and only as a choice --
+        // a text nobody asked for retires the code already on their phone.
+        TextCode.Visibility = twoFactor.Flag("can_sms") && twoFactor.Text("method", "") != "sms"
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
-    private static string DeliveryMessage(JsonElement delivery) => delivery.Text("method", "") switch
+    /// Show the code box, asking for a code first if the challenge has not
+    /// delivered one yet.
+    ///
+    /// A challenge that has already sent something must be left alone: reopening
+    /// the window would otherwise mint a code that retires the one the user is
+    /// reading off their phone.
+    private async Task ShowCodeEntryAsync(JsonElement twoFactor)
     {
-        "sms" => delivery.Text("number", "") is { Length: > 0 } number
-            ? $"Enter the code we texted to {number}"
-            : "Enter the code we texted you",
-        "trusted_device" => "Approve the prompt on your Apple device, then enter the six digits",
-        _ => "Enter the six-digit code Apple sent you",
-    };
+        ShowCodeEntry(twoFactor);
+        if (twoFactor.ValueKind == JsonValueKind.Object && !twoFactor.Flag("sent"))
+            await RequestCodeAsync();
+    }
+
+    /// <summary>
+    /// What to tell someone waiting on a code. Apple's own wording wins when it
+    /// gave any -- it knows what it just did with the challenge, and it stays
+    /// right when Apple changes its mind.
+    /// </summary>
+    private static string DeliveryMessage(JsonElement delivery)
+    {
+        if (delivery.Text("notice", "") is { Length: > 0 } notice) return notice;
+        return delivery.Text("method", "") switch
+        {
+            "sms" => delivery.Text("number", "") is { Length: > 0 } number
+                ? $"Enter the code we texted to {number}"
+                : "Enter the code we texted you",
+            "trusted_device" => "Enter the verification code shown on your Apple device",
+            _ => "Enter the six-digit code Apple sent you",
+        };
+    }
 
     private void Demo_Click(object sender, RoutedEventArgs e) => LoadDemo();
     private void LoadDemo()
@@ -507,7 +538,7 @@ public sealed partial class MainWindow : Window
             // working in cached data should be told, not thrown out of the app.
             case "auth_changed":
                 if (e.Data.Flag("authenticated")) await BootAsync();
-                else if (e.Data.Flag("needs_2fa")) ShowCodeEntry(e.Data.Property("two_factor"));
+                else if (e.Data.Flag("needs_2fa")) await ShowCodeEntryAsync(e.Data.Property("two_factor"));
                 else if (e.Data.Flag("restoring")) SetGateState("Signing you back in…");
                 else if (AuthGate.Visibility == Visibility.Collapsed)
                     ShowInfo("Sign in to resume syncing", "Cached reminders and queued edits remain available.", InfoBarSeverity.Warning);
