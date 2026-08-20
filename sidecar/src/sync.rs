@@ -67,21 +67,53 @@ impl SyncEngine {
         self.push_with_reauth().await
     }
 
+    /// Rebuild the session once after Apple refuses a request, or explain why not.
+    ///
+    /// The old version treated every failure to get back in as an expiry, and
+    /// announced it as one. That is what "it signs me out all the time" was: the
+    /// sticky sign-in notice went up over a dropped connection, and the only
+    /// thing that clears that notice is signing in -- so a ten-second blip cost
+    /// a password.
+    async fn recover_session(&self) -> Result<()> {
+        let outcome = {
+            let mut client = self.client.lock().await;
+            if client.awaiting_2fa() {
+                // Someone is at the code box. Rebuilding from here hands Apple a
+                // new challenge and retires the code they are halfway through
+                // typing, which is how a correct code ends up rejected.
+                return Err(AppError::TwoFactorRequired {
+                    message: "Enter the verification code to finish signing in.".into(),
+                    detail: String::new(),
+                });
+            }
+            client.invalidate();
+            let restored = client.restore().await;
+            (restored, client.restore_is_retryable(), client.restore_detail())
+        };
+        let (restored, retryable, detail) = outcome;
+        if restored {
+            self.emit("auth_changed", self.client.lock().await.status());
+            return Ok(());
+        }
+        if retryable {
+            // Nothing here established that the session is gone, so do not say
+            // that it is. The next pass tries again.
+            return Err(AppError::Network {
+                message: "Couldn't reach iCloud. Sync will try again shortly.".into(),
+                detail,
+            });
+        }
+        self.emit("auth_changed", self.client.lock().await.status());
+        Err(AppError::AuthRequired {
+            message: "Your iCloud session expired. Please sign in again.".into(),
+            detail: String::new(),
+        })
+    }
+
     async fn push_with_reauth(&self) -> Result<Value> {
         match self.flush_outbox().await {
             Err(AppError::AuthRequired { .. }) => {
-                let restored = {
-                    let mut client = self.client.lock().await;
-                    client.invalidate();
-                    client.restore().await
-                };
-                self.emit("auth_changed", self.client.lock().await.status());
-                if !restored {
-                    return Err(AppError::AuthRequired {
-                        message: "Your iCloud session expired. Please sign in again.".into(),
-                        detail: String::new(),
-                    });
-                }
+                self.recover_session().await?;
                 self.flush_outbox().await
             }
             result => result,
@@ -103,18 +135,7 @@ impl SyncEngine {
         };
         match first {
             Err(AppError::AuthRequired { .. }) => {
-                let restored = {
-                    let mut client = self.client.lock().await;
-                    client.invalidate();
-                    client.restore().await
-                };
-                self.emit("auth_changed", self.client.lock().await.status());
-                if !restored {
-                    return Err(AppError::AuthRequired {
-                        message: "Your iCloud session expired. Please sign in again.".into(),
-                        detail: String::new(),
-                    });
-                }
+                self.recover_session().await?;
                 if needs_full {
                     self.full_sync().await
                 } else {

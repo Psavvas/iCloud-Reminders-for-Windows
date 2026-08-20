@@ -97,6 +97,14 @@ public sealed partial class MainWindow : Window
             var status = await _sidecar.CallAsync("auth_status", new { });
             _settings = await _sidecar.CallAsync("settings", new { });
             ApplyTheme(_settings.Text("theme", "system"));
+            if (status.Flag("needs_2fa") && !status.Flag("authenticated"))
+            {
+                // Apple has a code outstanding. Asking for the password again is
+                // both wrong and destructive: signing in afresh makes Apple mint
+                // a new code and retire the one already sent.
+                ShowCodeEntry(status.Property("two_factor"));
+                return;
+            }
             if (status.Flag("authenticated") || status.Flag("has_cache"))
             {
                 AuthGate.Visibility = Visibility.Collapsed;
@@ -244,7 +252,7 @@ public sealed partial class MainWindow : Window
     {
         SetGateState("Signing in…");
         try { await _sidecar.CallAsync("login", new { apple_id = AppleIdBox.Text.Trim(), password = PasswordBox.Password }); PasswordBox.Password = ""; await BootAsync(); }
-        catch (SidecarException error) when (error.Code == "2FA_REQUIRED") { try { await _sidecar.CallAsync("request_2fa", new { }); } catch { } GateProgress.Visibility = Visibility.Collapsed; GateStatus.Text = "Enter the code sent to your Apple devices"; CodeFields.Visibility = Visibility.Visible; }
+        catch (SidecarException error) when (error.Code == "2FA_REQUIRED") { await RequestCodeAsync(); }
         catch (SidecarException error) when (error.Code == "TERMS_REQUIRED") { await AcceptTermsAsync(); }
         catch (Exception error) { ShowLogin(); GateError.Message = error.Message; GateError.IsOpen = true; }
     }
@@ -261,9 +269,64 @@ public sealed partial class MainWindow : Window
     }
     private async void Verify_Click(object sender, RoutedEventArgs e)
     {
-        try { await _sidecar.CallAsync("submit_2fa", new { code = CodeBox.Text.Trim() }); CodeBox.Text = ""; await BootAsync(); }
-        catch (Exception error) { GateError.Message = error.Message; GateError.IsOpen = true; }
+        // Digits only. Apple's own message and the Windows autofill both hand
+        // over "123 456", and a stray space is not a wrong code.
+        var code = new string(CodeBox.Text.Where(char.IsDigit).ToArray());
+        try { await _sidecar.CallAsync("submit_2fa", new { code }); CodeBox.Text = ""; await BootAsync(); }
+        catch (Exception error) { CodeBox.Text = ""; GateError.Message = error.Message; GateError.IsOpen = true; }
     }
+
+    private async void ResendCode_Click(object sender, RoutedEventArgs e) => await RequestCodeAsync();
+
+    /// <summary>
+    /// Ask Apple to send a verification code, and say where it went.
+    /// </summary>
+    /// <remarks>
+    /// This used to be <c>try { … } catch { }</c>. A failure to send meant no
+    /// code was ever coming, but the screen still asked for one and then called
+    /// every attempt invalid -- so the app blamed the user's typing for its own
+    /// dead end. It also matters *where* the code went: "the code sent to your
+    /// Apple devices" is useless to someone whose code arrived by text.
+    /// </remarks>
+    private async Task RequestCodeAsync()
+    {
+        ResendCode.IsEnabled = false;
+        GateError.IsOpen = false;
+        GateProgress.Visibility = Visibility.Collapsed;
+        LoginFields.Visibility = Visibility.Collapsed;
+        CodeFields.Visibility = Visibility.Visible;
+        CodeBox.Text = "";
+        try
+        {
+            var sent = await _sidecar.CallAsync("request_2fa", new { });
+            GateStatus.Text = DeliveryMessage(sent);
+        }
+        catch (Exception error)
+        {
+            GateStatus.Text = "Verification code";
+            GateError.Message = error.Message;
+            GateError.IsOpen = true;
+        }
+        finally { ResendCode.IsEnabled = true; }
+    }
+
+    private void ShowCodeEntry(JsonElement twoFactor)
+    {
+        AuthGate.Visibility = Visibility.Visible;
+        GateProgress.Visibility = Visibility.Collapsed;
+        LoginFields.Visibility = Visibility.Collapsed;
+        CodeFields.Visibility = Visibility.Visible;
+        GateStatus.Text = DeliveryMessage(twoFactor);
+    }
+
+    private static string DeliveryMessage(JsonElement delivery) => delivery.Text("method", "") switch
+    {
+        "sms" => delivery.Text("number", "") is { Length: > 0 } number
+            ? $"Enter the code we texted to {number}"
+            : "Enter the code we texted you",
+        "trusted_device" => "Approve the prompt on your Apple device, then enter the six digits",
+        _ => "Enter the six-digit code Apple sent you",
+    };
 
     private void Demo_Click(object sender, RoutedEventArgs e) => LoadDemo();
     private void LoadDemo()
@@ -438,7 +501,18 @@ public sealed partial class MainWindow : Window
         switch (e.Name)
         {
             case "ready": await BootAsync(); break;
-            case "auth_changed": if (e.Data.Flag("authenticated")) await BootAsync(); else ShowLogin(); break;
+            // Not authenticated is not the same as "start over". A restore that
+            // stopped at the second factor needs the code box, not the password
+            // box; one still in flight needs neither; and someone already
+            // working in cached data should be told, not thrown out of the app.
+            case "auth_changed":
+                if (e.Data.Flag("authenticated")) await BootAsync();
+                else if (e.Data.Flag("needs_2fa")) ShowCodeEntry(e.Data.Property("two_factor"));
+                else if (e.Data.Flag("restoring")) SetGateState("Signing you back in…");
+                else if (AuthGate.Visibility == Visibility.Collapsed)
+                    ShowInfo("Sign in to resume syncing", "Cached reminders and queued edits remain available.", InfoBarSeverity.Warning);
+                else ShowLogin();
+                break;
             case "sync_started": ShowInfo("Syncing", "Checking iCloud for changes…", InfoBarSeverity.Informational); break;
             case "sync_finished": AppInfoBar.IsOpen = false; await RefreshAllAsync(); break;
             case "sync_error": ShowInfo("Sync failed", e.Data.Text("message", "Try again in a moment."), InfoBarSeverity.Error); break;

@@ -22,6 +22,13 @@ const MAX_DESCRIPTION_BYTES: usize = 100_000;
 const MAX_ID_BYTES: usize = 2048;
 const MAX_SEARCH_BYTES: usize = 4096;
 
+/// How long to wait between restore attempts that failed for reasons that have
+/// nothing to do with the session. A laptop resuming from sleep, or one that
+/// launched before its Wi-Fi came up, is back within a couple of minutes; the
+/// last step keeps a longer outage from turning into a password prompt the
+/// moment the user looks at the window.
+const RESTORE_BACKOFF_SECONDS: [u64; 5] = [5, 15, 45, 120, 300];
+
 pub struct Server {
     pub cache: Arc<Cache>,
     client: Arc<Mutex<ICloudClient>>,
@@ -72,10 +79,33 @@ impl Server {
         self.emit("ready", json!({"apple_id":apple_id}));
         let server = self.clone();
         tokio::spawn(async move {
-            let ok = {
+            // A restore that failed because Apple was unreachable is retried
+            // rather than reported. Launching before the network is up is the
+            // most common way this fails, and answering it with the sign-in form
+            // is what "it signs me out all the time" looked like from outside.
+            let mut ok = {
                 let mut client = server.client.lock().await;
                 client.restore().await
             };
+            for delay in RESTORE_BACKOFF_SECONDS {
+                if ok {
+                    break;
+                }
+                {
+                    let mut client = server.client.lock().await;
+                    if !client.restore_is_retryable() {
+                        break;
+                    }
+                    // Keep saying "restoring" across the wait, so the gate holds
+                    // its "signing you back in" state rather than flashing a
+                    // password form over a blip it is about to recover from.
+                    client.restoring = true;
+                    server.set_auth_snapshot(client.status());
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                let mut client = server.client.lock().await;
+                ok = client.restore().await;
+            }
             let status = server.client.lock().await.status();
             server.set_auth_snapshot(status.clone());
             server.emit("auth_changed", status);
@@ -101,7 +131,15 @@ impl Server {
             "ping" => Ok(json!({"pong":true})),
             "auth_status" => self.auth_status().await,
             "login" => self.login(&object).await,
-            "request_2fa" => Ok(json!({"sent":self.client.lock().await.request_2fa().await?})),
+            "request_2fa" => {
+                // Report the whole outcome, not just a bool: the delivery route
+                // decides whether the screen should say "your iPhone" or "your
+                // texts", and a user cannot type a code they are looking past.
+                let mut client = self.client.lock().await;
+                let sent = client.request_2fa().await?;
+                self.set_auth_snapshot(client.status());
+                Ok(sent)
+            }
             "submit_2fa" => {
                 let code = required_string(&object, "code")?;
                 let mut client = self.client.lock().await;

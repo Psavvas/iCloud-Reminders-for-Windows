@@ -14,12 +14,33 @@ use crate::timeutil::{
     floating_millis_to_instant, instant_to_floating_millis, parse_instant, to_iso,
 };
 
+/// Why a restore gave up, and whether trying again on its own could help.
+///
+/// A bare `false` conflated "Apple ended the session" with "we could not reach
+/// Apple", and the app answered both with the sign-in screen. Most restores fail
+/// the second way -- the machine launched before its Wi-Fi came up, or woke
+/// mid-handshake -- and a password prompt is the wrong answer to that.
+#[derive(Clone, Debug, Default)]
+pub struct RestoreFailure {
+    pub retryable: bool,
+    pub detail: String,
+}
+
+/// Whether a failed restore is worth another attempt without asking anyone.
+///
+/// Not being able to reach Apple says nothing about the session. Apple actually
+/// refusing the credential does, and so does having no credential left to try.
+fn restore_is_worth_retrying(error: &AppError, has_credential: bool) -> bool {
+    matches!(error, AppError::Network { .. }) && has_credential
+}
+
 pub struct ICloudClient {
     apple_id: String,
     auth: AuthClient,
     connected: bool,
     pending_2fa: bool,
     pub restoring: bool,
+    restore_failure: Option<RestoreFailure>,
 }
 
 impl ICloudClient {
@@ -32,6 +53,7 @@ impl ICloudClient {
             connected: false,
             pending_2fa: false,
             restoring: false,
+            restore_failure: None,
         })
     }
 
@@ -40,6 +62,30 @@ impl ICloudClient {
     }
     pub fn connected(&self) -> bool {
         self.connected && !self.pending_2fa
+    }
+
+    /// A verification code is outstanding and someone is typing it right now.
+    ///
+    /// Worth asking before rebuilding the session. A restore runs the whole SRP
+    /// handshake again, which makes Apple mint a new challenge and retire the
+    /// code already in the user's hand -- so a background sync firing on its
+    /// timer was enough to make a correctly typed code come back rejected.
+    pub fn awaiting_2fa(&self) -> bool {
+        self.pending_2fa
+    }
+
+    /// Whether the last failed restore is worth another attempt unprompted.
+    pub fn restore_is_retryable(&self) -> bool {
+        self.restore_failure
+            .as_ref()
+            .is_some_and(|failure| failure.retryable)
+    }
+
+    pub fn restore_detail(&self) -> String {
+        self.restore_failure
+            .as_ref()
+            .map(|failure| failure.detail.clone())
+            .unwrap_or_default()
     }
     pub fn set_apple_id(&mut self, value: String) -> Result<()> {
         if value == self.apple_id {
@@ -56,7 +102,11 @@ impl ICloudClient {
         json!({
             "authenticated": self.connected(), "apple_id": self.apple_id,
             "needs_2fa": self.pending_2fa, "trusted_session":self.auth.state.trusted_session,
-            "restoring":self.restoring, "can_restore":secrets::has_password(&self.apple_id)
+            "restoring":self.restoring, "can_restore":secrets::has_password(&self.apple_id),
+            // So the sign-in screen can say where the code went, and so a gate
+            // reopened later resumes at the code box rather than asking for a
+            // password it already has.
+            "two_factor": self.auth.two_factor_status()
         })
     }
 
@@ -110,17 +160,41 @@ impl ICloudClient {
         if self.connected() {
             return true;
         }
+        if self.pending_2fa {
+            // Not ours to rebuild: the code the user is holding belongs to the
+            // challenge on the session we would be throwing away.
+            self.restore_failure = Some(RestoreFailure {
+                retryable: false,
+                detail: "waiting for a verification code".into(),
+            });
+            return false;
+        }
         self.restoring = true;
-        let result = self.connect(None, true, false).await.is_ok();
+        let result = self.connect(None, true, false).await;
         self.restoring = false;
-        result
+        match result {
+            Ok(_) => {
+                self.restore_failure = None;
+                true
+            }
+            Err(error) => {
+                self.restore_failure = Some(RestoreFailure {
+                    retryable: restore_is_worth_retrying(
+                        &error,
+                        secrets::has_password(&self.apple_id),
+                    ),
+                    detail: error.body().detail.to_owned(),
+                });
+                false
+            }
+        }
     }
 
     pub fn invalidate(&mut self) {
         self.connected = false;
         self.pending_2fa = false;
     }
-    pub async fn request_2fa(&self) -> Result<bool> {
+    pub async fn request_2fa(&mut self) -> Result<Value> {
         self.auth.request_2fa().await
     }
     pub async fn submit_2fa(&mut self, code: &str) -> Result<Value> {
@@ -130,6 +204,14 @@ impl ICloudClient {
         self.persist_session()?;
         Ok(self.status())
     }
+    /// Force the pending-code state, so the guard above can be exercised
+    /// without a live Apple challenge.
+    #[cfg(test)]
+    pub(crate) fn mark_awaiting_2fa(&mut self) {
+        self.pending_2fa = true;
+        self.connected = false;
+    }
+
     pub fn sign_out(&mut self) -> Result<()> {
         secrets::delete_password(&self.apple_id)?;
         secrets::delete_session(&self.apple_id)?;
@@ -549,4 +631,85 @@ fn parse_color(raw: Option<&str>) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|v| v.starts_with('#'))
         .map(str::to_owned)
+}
+
+// ---------------------------------------------------------------------------
+// Staying signed in.
+//
+// Two failures used to arrive here as the same bare `false`, and the app
+// answered both with the sign-in screen: Apple ending the session, and the app
+// not being able to reach Apple at all. The second is far more common -- a
+// machine that launched before its Wi-Fi came up, or woke mid-handshake -- and
+// a password prompt is the wrong answer to it.
+
+#[cfg(test)]
+mod session_tests {
+    use super::{ICloudClient, restore_is_worth_retrying};
+    use crate::error::AppError;
+
+    fn network() -> AppError {
+        AppError::Network {
+            message: "Could not reach iCloud".into(),
+            detail: "connection failed".into(),
+        }
+    }
+
+    fn expired() -> AppError {
+        AppError::AuthRequired {
+            message: "iCloud rejected the sign-in".into(),
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn an_unreachable_icloud_is_worth_another_go() {
+        assert!(restore_is_worth_retrying(&network(), true));
+    }
+
+    #[test]
+    fn a_credential_apple_refused_is_not() {
+        // Only the user can fix this one; retrying just locks the account.
+        assert!(!restore_is_worth_retrying(&expired(), true));
+    }
+
+    #[test]
+    fn nothing_to_retry_with_is_not_worth_retrying() {
+        assert!(!restore_is_worth_retrying(&network(), false));
+    }
+
+    #[tokio::test]
+    async fn a_restore_with_no_saved_credential_gives_up_cleanly() {
+        let mut client = ICloudClient::new("nobody@example.com".into()).expect("client");
+        assert!(!client.restore().await);
+        assert!(
+            !client.restore_is_retryable(),
+            "there is no credential to retry with, so retrying is pointless"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pending_code_survives_a_restore() {
+        // The background sync recovers an expired session by rebuilding it.
+        // Doing that while a code is outstanding runs the whole SRP handshake
+        // again, which makes Apple mint a new challenge and retire the code
+        // being typed -- the sync timer alone was enough to make a correct code
+        // come back rejected.
+        let mut client = ICloudClient::new("someone@example.com".into()).expect("client");
+        client.mark_awaiting_2fa();
+
+        assert!(!client.restore().await);
+        assert!(client.awaiting_2fa(), "the live challenge must be left alone");
+        assert!(
+            !client.restore_is_retryable(),
+            "the person at the code box finishes this, not a retry loop"
+        );
+    }
+
+    #[test]
+    fn the_status_carries_the_delivery_route_for_the_gate() {
+        let client = ICloudClient::new("someone@example.com".into()).expect("client");
+        let status = client.status();
+        assert_eq!(status["needs_2fa"], false);
+        assert_eq!(status["two_factor"]["method"], "unknown");
+    }
 }

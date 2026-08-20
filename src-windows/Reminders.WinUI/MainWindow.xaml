@@ -79,7 +79,7 @@
      <ProgressBar x:Name="GateProgress" IsIndeterminate="True"/>
      <TextBlock x:Name="GateStatus" Text="Starting the sync service…" HorizontalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
      <StackPanel x:Name="LoginFields" Spacing="12" Visibility="Collapsed"><TextBox x:Name="AppleIdBox" Header="Apple ID" PlaceholderText="you@icloud.com"/><PasswordBox x:Name="PasswordBox" Header="Password"/><Button Content="Sign in" Style="{ThemeResource AccentButtonStyle}" HorizontalAlignment="Stretch" Click="SignIn_Click"/></StackPanel>
-     <StackPanel x:Name="CodeFields" Spacing="12" Visibility="Collapsed"><TextBox x:Name="CodeBox" Header="Verification code" MaxLength="6"/><Button Content="Verify" Style="{ThemeResource AccentButtonStyle}" Click="Verify_Click"/></StackPanel>
+     <StackPanel x:Name="CodeFields" Spacing="12" Visibility="Collapsed"><TextBox x:Name="CodeBox" Header="Verification code" MaxLength="6"/><Button Content="Verify" Style="{ThemeResource AccentButtonStyle}" Click="Verify_Click"/><HyperlinkButton x:Name="ResendCode" Content="Send a new code" HorizontalAlignment="Center" Click="ResendCode_Click"/></StackPanel>
      <InfoBar x:Name="GateError" IsOpen="False" Severity="Error" IsClosable="False"/>
      <Button Content="Explore the UI with sample data" HorizontalAlignment="Center" Click="Demo_Click"/>
     </StackPanel>

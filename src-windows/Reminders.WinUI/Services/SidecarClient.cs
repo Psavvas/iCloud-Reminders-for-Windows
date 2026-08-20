@@ -203,4 +203,6 @@ internal static class JsonHelpers
     public static string Text(this JsonElement value, string name, string fallback = "") => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var node) && node.ValueKind == JsonValueKind.String ? node.GetString() ?? fallback : fallback;
     public static bool Flag(this JsonElement value, string name) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var node) && node.ValueKind == JsonValueKind.True;
     public static long Number(this JsonElement value, string name) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var node) && node.TryGetInt64(out var number) ? number : 0;
+    /// <summary>A nested object, or an undefined element the readers above treat as empty.</summary>
+    public static JsonElement Property(this JsonElement value, string name) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var node) ? node : default;
 }

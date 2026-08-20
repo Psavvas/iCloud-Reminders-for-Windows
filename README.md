@@ -99,7 +99,7 @@ getting-started guide for signing and Store identity options.
 | Search and sorting | Local SQLite queries; the network is not on the click path |
 | Tags | Read and filter only (an upstream iCloud limitation) |
 | Offline use | Full reads; edits queue and push after reconnecting |
-| Authentication | Apple ID, 2FA, terms acceptance and session restoration |
+| Authentication | Apple ID, 2FA by trusted device or text, terms acceptance and session restoration |
 | Conflicts | Preserved and explicitly resolved instead of overwritten |
 | Windows integration | Native theme, controls, badges and due notifications |
 | Sidebar | Persisted open/collapsed state with temporary hover expansion |

@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
@@ -100,21 +100,25 @@ async fn serve<R>(
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    // Cap the reader itself rather than checking the length after the fact:
-    // `next_line` would otherwise buffer an unbounded line before we could
-    // reject it. One byte of headroom lets us detect an over-long line.
-    let capped = reader.take((MAX_PROTOCOL_LINE_BYTES + 1) as u64);
-    let mut lines = BufReader::new(capped).lines();
+    let mut reader = BufReader::new(reader);
+    let mut buffer = Vec::new();
     let mut inflight = JoinSet::new();
-    while let Some(line) = lines.next_line().await.map_err(|e| {
-        error::AppError::internal("Could not read the command stream", e.to_string())
-    })? {
+    loop {
+        let outcome = read_bounded_line(&mut reader, &mut buffer).await.map_err(|e| {
+            error::AppError::internal("Could not read the command stream", e.to_string())
+        })?;
+        let line = match outcome {
+            LineOutcome::Eof => break,
+            LineOutcome::TooLong => {
+                // One request being too big is not a reason to stop serving the
+                // ones behind it.
+                let _=tx.send(json!({"id":Value::Null,"ok":false,"error":{"code":"BAD_REQUEST","message":"request is too large","detail":""}}));
+                continue;
+            }
+            LineOutcome::Line => String::from_utf8_lossy(&buffer).into_owned(),
+        };
         if line.trim().is_empty() {
             continue;
-        }
-        if line.len() > MAX_PROTOCOL_LINE_BYTES {
-            let _=tx.send(json!({"id":Value::Null,"ok":false,"error":{"code":"BAD_REQUEST","message":"request is too large","detail":""}}));
-            break;
         }
         let request: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
@@ -182,6 +186,62 @@ where
     .await;
     drop(tx);
     Ok(())
+}
+
+enum LineOutcome {
+    Line,
+    TooLong,
+    Eof,
+}
+
+/// Read one newline-terminated request into `buffer`.
+///
+/// The cap is per line, and enforced as the line streams in: an over-long
+/// request is discarded up to its newline without ever being held in memory,
+/// and the ones behind it are still served.
+///
+/// This replaced `reader.take(MAX + 1)`, which reads as a line cap but is a cap
+/// on the *whole stream* -- so the loop stopped reading for good once a session
+/// had sent a megabyte in total, and the app reported the sync service as
+/// stopped. The UI polls status every fifteen seconds and this app lives in the
+/// tray for weeks, so that is a few days of uptime, not a theoretical limit.
+async fn read_bounded_line<R>(reader: &mut R, buffer: &mut Vec<u8>) -> std::io::Result<LineOutcome>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    buffer.clear();
+    let mut too_long = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(if too_long {
+                LineOutcome::TooLong
+            } else if buffer.is_empty() {
+                LineOutcome::Eof
+            } else {
+                // A trailing request with no newline is still a request.
+                LineOutcome::Line
+            });
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take = newline.unwrap_or(available.len());
+        if !too_long {
+            if buffer.len() + take > MAX_PROTOCOL_LINE_BYTES {
+                too_long = true;
+                buffer.clear();
+            } else {
+                buffer.extend_from_slice(&available[..take]);
+            }
+        }
+        reader.consume(take + usize::from(newline.is_some()));
+        if newline.is_some() {
+            return Ok(if too_long {
+                LineOutcome::TooLong
+            } else {
+                LineOutcome::Line
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -284,6 +344,52 @@ mod tests {
         assert_eq!(replies[0]["ok"], json!(false));
         assert_eq!(replies[0]["error"]["code"], json!("NO_METHOD"));
         assert_eq!(replies[0]["error"]["detail"], json!(""));
+    }
+
+    /// Regression test. The cap was applied with `reader.take(..)`, which
+    /// limits the *whole stream* rather than one line -- so the sidecar stopped
+    /// reading for good once a session had sent a megabyte in total, and the app
+    /// reported the sync service as stopped. That is days of uptime, not
+    /// minutes: the UI polls status every fifteen seconds and this thing lives
+    /// in the tray for weeks.
+    #[tokio::test]
+    async fn the_size_cap_applies_per_line_not_to_the_whole_session() {
+        let pad = "x".repeat(100 * 1024);
+        let script: String = (1..=12)
+            .map(|id| format!("{{\"id\":{id},\"method\":\"ping\",\"params\":{{\"pad\":\"{pad}\"}}}}\n"))
+            .collect();
+        assert!(
+            script.len() > super::MAX_PROTOCOL_LINE_BYTES,
+            "the script has to cross the cap for this to prove anything"
+        );
+
+        let messages = exchange(&script).await;
+        let mut ids: Vec<i64> = replies(&messages)
+            .iter()
+            .filter_map(|reply| reply["id"].as_i64())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (1..=12).collect::<Vec<_>>());
+    }
+
+    /// One request being too big is not a reason to stop serving the ones after
+    /// it.
+    #[tokio::test]
+    async fn a_refused_line_does_not_end_the_session() {
+        let huge = "x".repeat(super::MAX_PROTOCOL_LINE_BYTES + 512);
+        let messages = exchange(&format!(
+            "{{\"id\":4,\"method\":\"ping\",\"pad\":\"{huge}\"}}\n{{\"id\":5,\"method\":\"ping\",\"params\":{{}}}}\n"
+        ))
+        .await;
+        let replies = replies(&messages);
+        assert!(
+            replies.iter().any(|r| r["error"]["message"] == json!("request is too large")),
+            "the oversized line should be refused: {messages:?}"
+        );
+        assert!(
+            replies.iter().any(|r| r["id"] == json!(5) && r["ok"] == json!(true)),
+            "the request after it must still be served: {messages:?}"
+        );
     }
 
     #[tokio::test]
