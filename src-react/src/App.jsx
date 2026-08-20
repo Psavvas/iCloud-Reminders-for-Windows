@@ -46,6 +46,9 @@ export default function App() {
   const [gateStep, setGateStep] = useState("loading");
   const [gateError, setGateError] = useState("");
   const [sidecarDetail, setSidecarDetail] = useState("");
+  // How the outstanding verification code was delivered, when one is. The gate
+  // needs it to say "your iPhone" or "your texts" rather than guessing.
+  const [twoFactor, setTwoFactor] = useState({});
 
   const [settings, setSettings] = useState({});
   const [lists, setLists] = useState([]);
@@ -149,6 +152,31 @@ export default function App() {
     await refreshStatus();
   }, [loadShell, loadRows, refreshStatus]);
 
+  /**
+   * Send the user back to whichever step of signing in is actually outstanding.
+   *
+   * Every one of these buttons used to jump straight to the password form. When
+   * only the second factor had lapsed that asked for a credential the app
+   * already had, and starting a fresh sign-in retires the code Apple had
+   * already sent -- so the code in the user's hand stopped working the moment
+   * they went looking for where to type it.
+   */
+  const resumeSignIn = useCallback(async () => {
+    setSheet(null);
+    setPhase("gate");
+    try {
+      const st = await call("auth_status");
+      if (st.needs_2fa) {
+        setTwoFactor(st.two_factor || {});
+        setGateStep("2fa");
+        return;
+      }
+    } catch {
+      /* fall through to the password form */
+    }
+    setGateStep("login");
+  }, []);
+
   // ------------------------------------------------------------------- boot
   const boot = useCallback(async () => {
     try {
@@ -161,6 +189,16 @@ export default function App() {
         setSearchScope(cfg.search_scope || "list");
       } catch {
         /* defaults are fine */
+      }
+
+      // Apple has a code outstanding: the password is not what is missing, and
+      // asking for it again is both wrong and destructive -- signing in afresh
+      // makes Apple mint a new code and retire the one already sent.
+      if (st.needs_2fa) {
+        setTwoFactor(st.two_factor || {});
+        setPhase("gate");
+        setGateStep("2fa");
+        return;
       }
 
       if (st.authenticated || st.has_cache) {
@@ -255,6 +293,14 @@ export default function App() {
         // The restore finished and failed. Only now is the password form the
         // right thing to show — not on the way there. Someone already looking
         // at cached data gets told rather than silently left with stale rows.
+        if (st.needs_2fa) {
+          // Except when what failed was only the second factor. The saved
+          // password is still good; a code is all that is missing.
+          setTwoFactor(st.two_factor || {});
+          setPhase("gate");
+          setGateStep("2fa");
+          return;
+        }
         setGateStep((s) => (s === "restoring" ? "login" : s));
         if (phase === "app") setAuthExpired(true);
       }),
@@ -420,6 +466,8 @@ export default function App() {
         setError={setGateError}
         sidecarDetail={sidecarDetail}
         setSidecarDetail={setSidecarDetail}
+        twoFactor={twoFactor}
+        setTwoFactor={setTwoFactor}
         onSignedIn={boot}
       />
     );
@@ -528,11 +576,7 @@ export default function App() {
           lists={lists}
           appleId={status.apple_id}
           authExpired={authExpired}
-          onReauth={() => {
-            setSheet(null);
-            setPhase("gate");
-            setGateStep("login");
-          }}
+          onReauth={resumeSignIn}
           onClose={() => setSheet(null)}
           onFullSync={async () => {
             await call("sync", { full: true });
@@ -583,14 +627,7 @@ export default function App() {
       )}
 
       {authExpired && (
-        <AuthNotice
-          appleId={status.apple_id}
-          onSignIn={() => {
-            setSheet(null);
-            setPhase("gate");
-            setGateStep("login");
-          }}
-        />
+        <AuthNotice appleId={status.apple_id} onSignIn={resumeSignIn} />
       )}
 
       <Banner

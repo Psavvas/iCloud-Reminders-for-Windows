@@ -2,13 +2,36 @@ import { useState } from "react";
 import { call, invoke, parseError } from "../bridge.js";
 import AppMark from "./AppMark.jsx";
 
+/**
+ * What to tell someone waiting on a code, given how Apple sent it.
+ *
+ * Not decoration. Apple picks the route -- a prompt on a trusted device, a text,
+ * or a hardware key it will not let us prompt for -- and "approve the prompt on
+ * your iPhone" is useless advice to someone whose code came by SMS. They read
+ * it, look at the wrong screen, and conclude the app is broken.
+ */
+function deliveryHint(twoFactor) {
+  const { method, notice, sent } = twoFactor || {};
+  if (notice) return notice;
+  if (method === "sms") return "We texted you a code. Enter the six digits.";
+  if (method === "security_key")
+    return "This Apple ID verifies with a hardware security key. Sign in at icloud.com once to trust this PC, then try again.";
+  if (method === "trusted_device")
+    return "Approve the prompt on your iPhone, then enter the six digits.";
+  if (sent === false)
+    return "Apple didn't confirm it sent a code. Try Send a new code.";
+  return "Enter the six-digit code Apple sent you.";
+}
+
 export default function Gate({
   step, setStep, error, setError, sidecarDetail, setSidecarDetail, onSignedIn,
+  twoFactor, setTwoFactor,
 }) {
   const [appleId, setAppleId] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [busyText, setBusyText] = useState("Connecting…");
+  const [resending, setResending] = useState(false);
 
   const signIn = async (acceptTerms = false) => {
     setError("");
@@ -22,9 +45,15 @@ export default function Gate({
       });
       onSignedIn();
     } catch (e) {
-      const { code: c, message, detail } = parseError(e);
+      const { code: c, message, detail, data } = parseError(e);
       if (c === "2FA_REQUIRED") {
-        try { await call("request_2fa"); } catch { /* may already be sent */ }
+        // Deliberately *not* asking for another code here. The sidecar armed
+        // the challenge as it raised this, and asking again makes Apple mint a
+        // new code and retire the one already on its way -- so the message the
+        // user is reading goes stale as they read it, and every code they type
+        // comes back invalid.
+        setTwoFactor(data || {});
+        setCode("");
         setStep("2fa");
       } else if (c === "TERMS_REQUIRED") {
         setStep("terms");
@@ -35,6 +64,29 @@ export default function Gate({
         setStep("login");
         setError(message);
       }
+    }
+  };
+
+  const resend = async () => {
+    setError("");
+    setResending(true);
+    try {
+      const info = await call("request_2fa");
+      setTwoFactor(info || {});
+      setCode("");
+      if (info && info.sent === false) {
+        setError(
+          info.error
+            ? "Apple wouldn't send a code: " + info.error
+            : "Apple didn't send a code. Check your devices are online."
+        );
+      }
+    } catch (e) {
+      // Swallowing this is what left people entering codes against a challenge
+      // that had never been set up.
+      setError(parseError(e).message);
+    } finally {
+      setResending(false);
     }
   };
 
@@ -111,16 +163,21 @@ export default function Gate({
               e.preventDefault();
               setError("");
               try {
-                await call("submit_2fa", { code: code.trim() });
+                await call("submit_2fa", { code });
                 onSignedIn();
               } catch (err) {
-                setError(parseError(err).message);
+                const { message, data } = parseError(err);
+                // A rejection can carry a *replacement* challenge: Apple closes
+                // the verification session after one verdict, so the sidecar
+                // arms a new one rather than leaving the user retyping a code
+                // that now has nothing to check it against.
+                if (data && data.method) setTwoFactor(data);
+                setCode("");
+                setError(message);
               }
             }}
           >
-            <p className="hint centered">
-              Approve the prompt on your iPhone, then enter the six digits.
-            </p>
+            <p className="hint centered">{deliveryHint(twoFactor)}</p>
             <input
               className="code-input"
               inputMode="numeric"
@@ -128,7 +185,8 @@ export default function Gate({
               placeholder="······"
               autoComplete="one-time-code"
               value={code}
-              onChange={(e) => setCode(e.target.value)}
+              // Apple's mail and the Windows autofill both hand over "123 456".
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
               required
               autoFocus
             />
@@ -136,9 +194,10 @@ export default function Gate({
             <button
               type="button"
               className="linkish"
-              onClick={() => call("request_2fa").catch(() => {})}
+              onClick={resend}
+              disabled={resending}
             >
-              Send a new code
+              {resending ? "Sending…" : "Send a new code"}
             </button>
           </form>
         )}

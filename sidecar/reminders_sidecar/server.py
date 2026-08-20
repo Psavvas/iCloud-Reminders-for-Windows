@@ -61,7 +61,7 @@ class Server:
             "auth_status": self.m_auth_status,
             "login": self.m_login,
             "submit_2fa": self.m_submit_2fa,
-            "request_2fa": lambda p: {"sent": self.client.request_2fa()},
+            "request_2fa": lambda p: self.client.request_2fa(),
             "lists": lambda p: self.cache.lists(),
             "reminders": self.m_reminders,
             "smart_counts": lambda p: self.cache.smart_counts(),
@@ -163,6 +163,13 @@ class Server:
         self._kick_sync(full=not self.cache.lists())
         return st
 
+    # How long to wait between restore attempts that failed for reasons that
+    # have nothing to do with the session. A laptop resuming from sleep, or a
+    # machine that launched the app before its Wi-Fi came up, is back inside a
+    # couple of minutes; the last step keeps a longer outage from turning into a
+    # password prompt the moment the user looks at the window.
+    RESTORE_BACKOFF_SECONDS = (5, 15, 45, 120, 300)
+
     def _restore_session(self) -> None:
         """
         Try to pick up where the last run left off, in the background.
@@ -171,6 +178,11 @@ class Server:
         "not authenticated" on every launch, so the app asks for a password each
         time even though the stored session was still good. It runs off-thread
         because it talks to Apple and the stdio loop must stay responsive.
+
+        A failure to reach Apple is retried rather than reported: launching
+        before the network is up is the single most common way this fails, and
+        answering it with the sign-in form is what "it signs me out all the
+        time" looked like from the outside.
         """
         if self.client.connected or not self.apple_id:
             return
@@ -182,6 +194,16 @@ class Server:
 
         def run():
             ok = self.client.restore()
+            for delay in self.RESTORE_BACKOFF_SECONDS:
+                if ok or not getattr(self.client, "restore_is_retryable", False):
+                    break
+                # Keep saying "restoring" across the wait, so the UI holds the
+                # "signing you back in" state instead of dropping to a password
+                # form over a blip it is about to recover from.
+                self.client.restoring = True
+                if self._stop.wait(delay):
+                    return
+                ok = self.client.restore()
             self.emit("auth_changed", self.client.status())
             if ok:
                 self._kick_sync(full=not self.cache.lists())

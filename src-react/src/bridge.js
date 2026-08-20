@@ -31,7 +31,13 @@ export function listen(event, handler) {
   };
 }
 
-/** Sidecar errors arrive as a JSON string; pull out the parts the UI acts on. */
+/**
+ * Sidecar errors arrive as a JSON string; pull out the parts the UI acts on.
+ *
+ * `data` carries whatever structure the error needs beyond prose -- 2FA uses it
+ * to say how the code was delivered, which decides whether the screen should
+ * say "your iPhone" or "your texts".
+ */
 export function parseError(e) {
   try {
     const o = typeof e === "string" ? JSON.parse(e) : e;
@@ -39,8 +45,9 @@ export function parseError(e) {
       code: o.code || "ERROR",
       message: o.message || String(e),
       detail: o.detail || "",
+      data: o.data || {},
     };
   } catch {
-    return { code: "ERROR", message: String(e), detail: "" };
+    return { code: "ERROR", message: String(e), detail: "", data: {} };
   }
 }

@@ -27,7 +27,13 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from .db import Cache, to_iso, utcnow
-from .icloud import AuthRequired, ConflictError, ICloudClient, SidecarError
+from .icloud import (
+    AuthRequired,
+    ConflictError,
+    ICloudClient,
+    NetworkError,
+    SidecarError,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -304,17 +310,38 @@ class SyncEngine:
         """
         try:
             return fn()
-        except AuthRequired:
+        except AuthRequired as exc:
+            if getattr(self.client, "awaiting_2fa", False):
+                # Someone is at the code box. Rebuilding the session from here
+                # would hand Apple a new challenge and retire the code they are
+                # halfway through typing -- which is how a correct code ends up
+                # rejected. Let the failure stand; the sign-in will finish it.
+                raise
+
             # The stale session has to go first. CloudKit answering 401 leaves
             # the client object looking connected, and restore() treats an
             # already-connected client as nothing to do -- so without this the
             # retry re-used the dead session and expiry always reached the user.
             self.client.invalidate()
-            if not self.client.restore():
-                # Now that the session is really gone, say so. Otherwise the UI
-                # goes on showing a signed-in account that cannot sync.
+            if self.client.restore():
+                LOGGER.info(
+                    "iCloud session restored; retrying %s", getattr(fn, "__name__", fn)
+                )
                 self.emit("auth_changed", self.client.status())
-                raise
-            LOGGER.info("iCloud session restored; retrying %s", getattr(fn, "__name__", fn))
+                return fn()
+
+            # A restore that failed because Apple was unreachable says nothing
+            # about the session. Announcing it as an expiry raised the sticky
+            # "iCloud sign-in needed" notice, and the only thing that clears that
+            # notice is signing in -- so a dropped connection cost a password.
+            # Report it as what it is and let the next pass try again.
+            if getattr(self.client, "restore_is_retryable", False):
+                detail = getattr(self.client.last_restore_error, "detail", "")
+                raise NetworkError(
+                    "Couldn't reach iCloud. Sync will try again shortly.", detail
+                ) from exc
+
+            # Now that the session is really gone, say so. Otherwise the UI
+            # goes on showing a signed-in account that cannot sync.
             self.emit("auth_changed", self.client.status())
-            return fn()
+            raise

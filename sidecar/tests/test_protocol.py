@@ -136,8 +136,23 @@ def test_unknown_method_is_reported_not_raised(server):
 def test_errors_serialize_with_a_code(server):
     err = AuthRequired("expired", "detail here")
     assert err.to_dict() == {
-        "code": "AUTH_REQUIRED", "message": "expired", "detail": "detail here"
+        "code": "AUTH_REQUIRED",
+        "message": "expired",
+        "detail": "detail here",
+        "data": {},
     }
+
+
+def test_errors_can_carry_structured_data_for_the_ui(server):
+    """
+    2FA needs to say *how* the code was sent. A message string cannot be
+    branched on, and "check your iPhone" is the wrong advice for a code that
+    arrived by text.
+    """
+    from reminders_sidecar.icloud import TwoFactorRequired
+
+    err = TwoFactorRequired("code needed", data={"method": "sms", "sent": True})
+    assert err.to_dict()["data"] == {"method": "sms", "sent": True}
 
 
 def test_resolve_conflict_keeping_local_requeues_the_edit(server):

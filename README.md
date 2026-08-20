@@ -97,10 +97,16 @@ Windows 11 has everything it needs at runtime; Windows 10 may want the
 
 ### First launch
 
-Apple ID, password, then a 2FA code. After that a short setup covers what stays
-running in the tray, notifications and start-with-Windows, and the two things
-Apple will not allow — so they are known up front rather than discovered three
-weeks later.
+Apple ID, password, then a 2FA code. Apple picks how that code reaches you — a
+prompt on a trusted device, or a text — and the code screen says which, because
+"approve the prompt on your iPhone" is no help to someone whose code arrived by
+SMS. Ask for a new one from that screen if it doesn't turn up; asking is the
+only thing that retires the previous code, so it is a button rather than
+something the app does behind you.
+
+After that a short setup covers what stays running in the tray, notifications
+and start-with-Windows, and the two things Apple will not allow — so they are
+known up front rather than discovered three weeks later.
 
 Closing the window hides it to the tray. That is deliberate: the scheduler has
 to keep running for due-date toasts to be worth anything. Quit from the tray
@@ -114,6 +120,13 @@ rebuild a session from the stored credential and the trust token without
 prompting. It does that on every launch, and again the moment a background sync
 is refused. You see the sign-in screen when a restore actually fails — not on a
 timer.
+
+Failing to *reach* Apple is not a failed restore. A machine that launched before
+its Wi-Fi came up, or woke from sleep mid-handshake, is retried on a backoff
+while the screen keeps saying "signing you back in"; only Apple actually
+refusing the credential reaches the password form. And when it is just the trust
+token that has lapsed, you get the code box, not the password box — the password
+was never the missing part.
 
 Turn it off under **Settings → Account** if you would rather type the password
 each time. Signing out clears the stored credential either way.
@@ -411,11 +424,13 @@ pip install ./sidecar pytest
 cd sidecar; python -m pytest
 ```
 
-161 tests, aimed at the things that are hard to check by looking:
+185 tests, aimed at the things that are hard to check by looking:
 
 - wall-clock and timezone conversion, including the all-day case
 - cache filtering, ordering and the Completed cap
 - delta sync, conflict recording, and session restore after expiry
+- the two-factor handshake: that the challenge is armed once, survives a
+  background sync, and that a correct code is never reported as a wrong one
 - the stdio protocol contract, and the frozen-build entry point
 - sleep/wake notification batching
 - the icon set — every Windows shell size present, the small art still legible,

@@ -14,7 +14,7 @@ import threading
 
 import pytest
 
-from reminders_sidecar.icloud import AuthRequired, ICloudClient
+from reminders_sidecar.icloud import AuthRequired, ICloudClient, NetworkError
 from reminders_sidecar.server import Server
 from reminders_sidecar.sync import SyncEngine
 from tests.test_sync_and_server import FakeClient
@@ -23,11 +23,14 @@ from tests.test_sync_and_server import FakeClient
 class FakeKeyringClient(ICloudClient):
     """An ICloudClient whose keyring and network are both in memory."""
 
-    def __init__(self, apple_id="a@b.c", password_accepted=True):
+    def __init__(self, apple_id="a@b.c", password_accepted=True, offline=False):
         super().__init__(apple_id)
         self.saved: dict[str, str] = {}
         self.connects: list[str | None] = []
         self.password_accepted = password_accepted
+        # Apple unreachable, as opposed to Apple saying no. The app used to
+        # treat the two the same, which is how a Wi-Fi blip cost a password.
+        self.offline = offline
 
     def remember_password(self, password):
         self.saved[self.apple_id] = password
@@ -42,6 +45,8 @@ class FakeKeyringClient(ICloudClient):
 
     def connect(self, password=None, accept_terms=False):
         self.connects.append(password)
+        if self.offline:
+            raise NetworkError("Could not reach iCloud", "name resolution failed")
         effective = password or self.saved.get(self.apple_id)
         if not effective or not self.password_accepted:
             raise AuthRequired("iCloud rejected the sign-in")
@@ -318,4 +323,121 @@ def test_the_sync_retry_drops_the_dead_session_before_restoring(tmp_path):
 
     assert order == ["lists:1", "invalidate", "lists:2"], order
     assert client.connects == [None], "the retry must run on a rebuilt session"
+    cache.close()
+
+
+# ------------------------------------------------- unreachable, not expired ---
+#
+# The other half of "it signs me out all the time". Everything above assumes a
+# failure means the session is gone. Most of them don't: the laptop woke before
+# its Wi-Fi did, the VPN was mid-handshake, Apple was briefly unwell. Answering
+# those with the sign-in form -- or worse, the sticky notice that only a sign-in
+# clears -- turns a ten-second blip into a password prompt.
+
+
+def test_a_network_failure_is_not_a_lost_session():
+    client = FakeKeyringClient(offline=True)
+    client.saved["a@b.c"] = "hunter2"
+
+    assert client.restore() is False
+    assert isinstance(client.last_restore_error, NetworkError)
+    assert client.restore_is_retryable is True
+
+
+def test_a_rejected_credential_is_not_retried_forever():
+    """Apple saying no is not a blip; only the user can fix it."""
+    client = FakeKeyringClient(password_accepted=False)
+    client.saved["a@b.c"] = "stale"
+
+    assert client.restore() is False
+    assert isinstance(client.last_restore_error, AuthRequired)
+    assert client.restore_is_retryable is False
+
+
+def test_the_startup_restore_retries_a_network_failure_before_giving_up(server):
+    """
+    Launching before the network is up is the most common way this fails. One
+    attempt and then a password form is what the app looked like it was doing.
+    """
+    server.client.saved["a@b.c"] = "hunter2"
+    server.client.offline = True
+    server.RESTORE_BACKOFF_SECONDS = (0.01, 0.01, 0.01)
+
+    original = server.client.connect
+
+    def connect(password=None, accept_terms=False):
+        # Third attempt: the network is there now.
+        if len(server.client.connects) >= 2:
+            server.client.offline = False
+        return original(password=password, accept_terms=accept_terms)
+
+    server.client.connect = connect  # type: ignore[assignment]
+    server._restore_session()
+    _join_threads()
+
+    assert server.client.connected, server.client.connects
+    assert len(server.client.connects) > 1, "one attempt is not a retry"
+
+
+def test_the_ui_is_told_to_keep_waiting_while_a_retry_is_pending(server):
+    """
+    `restoring` is what holds the gate on "signing you back in". Dropping it
+    between attempts flashes the password form at someone whose session is fine.
+    """
+    server.client.saved["a@b.c"] = "hunter2"
+    server.client.offline = True
+    server.RESTORE_BACKOFF_SECONDS = (0.5,)
+
+    server._restore_session()
+    threading.Event().wait(0.15)
+    st = call(server, "auth_status")
+    assert st["restoring"] is True
+    server._stop.set()
+    _join_threads()
+    server._stop.clear()
+
+
+def test_an_unreachable_icloud_does_not_report_itself_as_a_sign_out(tmp_path):
+    """
+    A restore that failed on the network used to surface as AUTH_REQUIRED, which
+    raises the sticky "iCloud sign-in needed" notice -- and the only thing that
+    clears that notice is signing in.
+    """
+    from reminders_sidecar.db import Cache
+
+    cache = Cache(tmp_path / "n1.db")
+    client = FakeKeyringClient(offline=True)
+    client.saved["a@b.c"] = "hunter2"
+    client._api = object()
+    client.lists = _always_expired  # type: ignore[assignment]
+
+    events: list[tuple] = []
+    engine = SyncEngine(cache, client, emit=lambda e, d: events.append((e, d)))
+
+    with pytest.raises(NetworkError):
+        engine.sync_now(full=True)
+
+    assert not [e for e, _ in events if e == "auth_changed"], (
+        "nothing here established that the session is gone"
+    )
+    cache.close()
+
+
+def test_a_session_apple_really_ended_still_reaches_the_user(tmp_path):
+    """The counterweight: a genuine expiry must not be swallowed as a blip."""
+    from reminders_sidecar.db import Cache
+
+    cache = Cache(tmp_path / "n2.db")
+    client = FakeKeyringClient(password_accepted=False)
+    client.saved["a@b.c"] = "stale"
+    client._api = object()
+    client.lists = _always_expired  # type: ignore[assignment]
+
+    events: list[tuple] = []
+    engine = SyncEngine(cache, client, emit=lambda e, d: events.append((e, d)))
+
+    with pytest.raises(AuthRequired):
+        engine.sync_now(full=True)
+
+    assert [e for e, _ in events if e == "auth_changed"]
     cache.close()

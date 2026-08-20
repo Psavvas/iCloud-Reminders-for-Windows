@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
@@ -28,19 +30,41 @@ from .timeutil import floating_to_instant, instant_to_floating
 
 LOGGER = logging.getLogger(__name__)
 
+# What an actually-unauthorized answer from Apple looks like in a message.
+#
+# The old test was `"401" in text or "403" in text`, which also matches a record
+# name, a reminder count, and a request id -- every one of those turned a
+# perfectly good session into "sign in again". Anchor on the status code being
+# used *as* a status.
+_UNAUTHORIZED = re.compile(
+    r"\b(?:401|403)\b\s*(?:client\s+)?(?:error|unauthori[sz]ed|forbidden)"
+    r"|(?:status|status_code|http)\W{0,3}(?:401|403)\b",
+    re.I,
+)
+
 
 class SidecarError(Exception):
     """Base error carrying a stable machine-readable code for the UI."""
 
     code = "ERROR"
 
-    def __init__(self, message: str, detail: str = ""):
+    def __init__(self, message: str, detail: str = "", data: Optional[dict] = None):
         super().__init__(message)
         self.message = message
         self.detail = detail
+        # Structured extras the UI can render. 2FA uses it to say *how* the code
+        # was sent, which is the difference between "check your iPhone" and
+        # "check your texts" -- and the user cannot type a code they are staring
+        # past.
+        self.data = dict(data or {})
 
     def to_dict(self) -> dict:
-        return {"code": self.code, "message": self.message, "detail": self.detail}
+        return {
+            "code": self.code,
+            "message": self.message,
+            "detail": self.detail,
+            "data": self.data,
+        }
 
 
 class AuthRequired(SidecarError):
@@ -127,11 +151,36 @@ class ICloudClient:
         self._api = None
         self._pending_2fa = False
         self.restoring = False
+        # How the outstanding verification code was delivered, if any. Empty
+        # once there is no challenge in flight.
+        self._two_factor: dict = {}
+        # Why the last restore gave up. A network failure and a rejected
+        # credential both used to arrive here as a bare False, and the caller
+        # then treated both as "you have been signed out".
+        self.last_restore_error: Optional[SidecarError] = None
+        # Serializes everything that swaps `_api` out. The background restore
+        # and a login typed into the gate are two different threads reaching for
+        # the same field: whichever finished last won, and if that was the
+        # restore it threw away the 2FA challenge the login had just armed --
+        # after which every code the user typed was checked against nothing.
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ auth
     @property
     def connected(self) -> bool:
         return self._api is not None and not self._pending_2fa
+
+    @property
+    def awaiting_2fa(self) -> bool:
+        """
+        A verification code is outstanding and someone is typing it right now.
+
+        Worth asking before rebuilding the session: the challenge lives on the
+        PyiCloudService object, so replacing it makes Apple mint a fresh code and
+        retire the one in the user's hand. A background sync doing that on its
+        timer is enough to make a correctly typed code come back "invalid".
+        """
+        return self._api is not None and self._pending_2fa
 
     def _service(self):
         if not self.connected:
@@ -195,8 +244,10 @@ class ICloudClient:
         and the trust token all survive, which is what lets the reconnect
         happen without a 2FA prompt.
         """
-        self._api = None
-        self._pending_2fa = False
+        with self._lock:
+            self._api = None
+            self._pending_2fa = False
+            self._two_factor = {}
 
     def restore(self) -> bool:
         """
@@ -208,20 +259,49 @@ class ICloudClient:
         Returns False rather than raising -- a failed restore just means the
         sign-in screen, not an error worth showing.
         """
-        if self.connected or not self.apple_id:
-            return self.connected
-        self.restoring = True
-        try:
-            self.connect()
-            return True
-        except SidecarError as exc:
-            LOGGER.info("session restore failed (%s): %s", exc.code, exc.message)
-            return False
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.info("session restore failed: %s", exc)
-            return False
-        finally:
-            self.restoring = False
+        with self._lock:
+            if self.connected or not self.apple_id:
+                return self.connected
+            if self.awaiting_2fa:
+                # Not ours to rebuild: the code the user is holding belongs to
+                # the challenge on the session we would be throwing away.
+                self.last_restore_error = TwoFactorRequired(
+                    "Waiting for a verification code", data=dict(self._two_factor)
+                )
+                return False
+            self.restoring = True
+            self.last_restore_error = None
+            try:
+                self.connect()
+                return True
+            except SidecarError as exc:
+                self.last_restore_error = exc
+                LOGGER.info("session restore failed (%s): %s", exc.code, exc.message)
+                return False
+            except Exception as exc:  # noqa: BLE001
+                self.last_restore_error = NetworkError(
+                    "Could not reach iCloud", str(exc)
+                )
+                LOGGER.info("session restore failed: %s", exc)
+                return False
+            finally:
+                self.restoring = False
+
+    @property
+    def restore_is_retryable(self) -> bool:
+        """
+        Whether a failed restore is worth another go on its own.
+
+        Not being able to reach Apple says nothing about the session -- the
+        laptop woke up before its Wi-Fi did, or the VPN was mid-handshake. The
+        app used to answer that with the sticky "iCloud sign-in needed" notice,
+        which only a full sign-in clears, so a ten-second network blip cost a
+        password. A credential Apple actually rejected, or a 2FA prompt, is a
+        different thing: those genuinely need the person.
+        """
+        return isinstance(self.last_restore_error, NetworkError) and (
+            self.has_saved_password
+        )
 
     def connect(self, password: Optional[str] = None, accept_terms: bool = False):
         """
@@ -235,48 +315,217 @@ class ICloudClient:
             PyiCloudFailedLoginException,
         )
 
+        with self._lock:
+            # A half-built session from a previous attempt must not survive into
+            # this one. pyicloud hangs the whole 2FA challenge off the service
+            # object, so keeping the old one around means a code minted for the
+            # old challenge being checked against the new one.
+            self._api = None
+            self._pending_2fa = False
+            self._two_factor = {}
+            try:
+                kwargs: dict[str, Any] = {"accept_terms": accept_terms}
+                if self.cookie_dir:
+                    kwargs["cookie_directory"] = self.cookie_dir
+                self._api = PyiCloudService(self.apple_id, password=password, **kwargs)
+            except PyiCloudAcceptTermsException as exc:
+                raise TermsRequired(
+                    "Apple requires you to accept updated iCloud terms before "
+                    "this app can sync.",
+                    str(exc),
+                ) from exc
+            except PyiCloud2FARequiredException as exc:
+                self._pending_2fa = True
+                # Only if the service object survived the raise: with no session
+                # there is nothing to arm, and failing that here would turn
+                # "enter your code" into "sign in again".
+                data = self.arm_2fa() if self._api is not None else {}
+                raise TwoFactorRequired(
+                    "Two-factor authentication required", str(exc), data=data
+                ) from exc
+            except PyiCloudFailedLoginException as exc:
+                raise AuthRequired("iCloud rejected the sign-in", str(exc)) from exc
+            except Exception as exc:  # noqa: BLE001
+                raise NetworkError("Could not reach iCloud", str(exc)) from exc
+
+            if self._api.requires_2fa:
+                self._pending_2fa = True
+                raise TwoFactorRequired(
+                    "Two-factor authentication required", data=self.arm_2fa()
+                )
+            self._pending_2fa = False
+            return self.status()
+
+    # -- two-factor ----------------------------------------------------------
+    #
+    # pyicloud picks the verifier for a code from state that only
+    # `request_2fa_code` establishes. For an account with trusted devices that
+    # is Apple's HSA2 *bridge*: a live websocket to Apple's push service, over
+    # which the code shown on the iPhone is negotiated. With no bridge in hand
+    # `validate_2fa_code` quietly falls back to the legacy
+    # /verify/trusteddevice/securitycode endpoint, which Apple no longer accepts
+    # for these accounts -- so every code came back "invalid", however carefully
+    # it was typed.
+    #
+    # Two rules follow, and the sign-in flow was breaking both:
+    #
+    #   1. Arm the challenge exactly once, and do it here, so the code that goes
+    #      out is the code the verifier is expecting. Arming twice is not
+    #      harmless -- each attempt makes Apple mint a *new* code and retire the
+    #      previous one, so the message the user is reading is already dead.
+    #   2. Never swallow a failure to arm. A bridge that would not bootstrap
+    #      used to be caught and ignored by the sign-in screen, after which
+    #      nothing could ever verify and the app blamed the user's typing.
+
+    def arm_2fa(self) -> dict:
+        """
+        Ask Apple to deliver a verification code, and record how it went.
+
+        Returns {sent, method, notice, error}. `method` is one of Apple's
+        delivery routes -- trusted_device, sms, security_key -- because "enter
+        the code on your iPhone" is useless advice to someone whose code came
+        by text.
+        """
+        with self._lock:
+            if self._api is None:
+                raise AuthRequired("Not signed in")
+            info: dict[str, Any] = {"sent": False, "method": "unknown", "notice": None}
+            try:
+                info["sent"] = bool(self._api.request_2fa_code())
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("2FA delivery failed: %s", exc)
+                info["error"] = str(exc)
+                if self._request_sms_code():
+                    info["sent"] = True
+                    info.pop("error", None)
+            info["method"] = self._delivery_method()
+            info["notice"] = getattr(self._api, "two_factor_delivery_notice", None)
+            self._two_factor = info
+            return dict(info)
+
+    def _request_sms_code(self) -> bool:
+        """
+        Fall back to a text message when the trusted-device bridge will not come up.
+
+        pyicloud only offers SMS once Apple has already said `mode == "sms"`,
+        which it does not say while the account has trusted devices -- precisely
+        the case where the bridge is the thing that just failed. A trusted phone
+        number on the challenge is enough to ask for a text, so ask.
+        """
+        api = self._api
         try:
-            kwargs: dict[str, Any] = {"accept_terms": accept_terms}
-            if self.cookie_dir:
-                kwargs["cookie_directory"] = self.cookie_dir
-            self._api = PyiCloudService(self.apple_id, password=password, **kwargs)
-        except PyiCloudAcceptTermsException as exc:
-            raise TermsRequired(
-                "Apple requires you to accept updated iCloud terms before "
-                "this app can sync.",
-                str(exc),
-            ) from exc
-        except PyiCloud2FARequiredException as exc:
-            self._pending_2fa = True
-            raise TwoFactorRequired("Two-factor authentication required", str(exc)) from exc
-        except PyiCloudFailedLoginException as exc:
-            raise AuthRequired("iCloud rejected the sign-in", str(exc)) from exc
+            if api._trusted_phone_number() is None:  # noqa: SLF001
+                return False
+            api._request_sms_2fa_code(  # noqa: SLF001
+                notice="We couldn't reach your Apple devices, so we sent a text instead."
+            )
+            return True
         except Exception as exc:  # noqa: BLE001
-            raise NetworkError("Could not reach iCloud", str(exc)) from exc
+            LOGGER.warning("SMS fallback failed: %s", exc)
+            return False
 
-        if self._api.requires_2fa:
-            self._pending_2fa = True
-            raise TwoFactorRequired("Two-factor authentication required")
-        self._pending_2fa = False
-        return self.status()
+    def _delivery_method(self) -> str:
+        try:
+            return str(self._api.two_factor_delivery_method)
+        except Exception:  # noqa: BLE001
+            return "unknown"
 
-    def request_2fa(self) -> bool:
-        if self._api is None:
-            raise AuthRequired("Not signed in")
-        return bool(self._api.request_2fa_code())
+    def _challenge_is_armed(self) -> bool:
+        """
+        Whether there is a live challenge for a code to be checked against.
+
+        The bridge is a websocket session that Apple closes after one verdict,
+        so a rejected code leaves nothing behind. Noticing that here is what
+        turns a second dead end into "here is a fresh code".
+        """
+        if self._delivery_method() != "trusted_device":
+            # SMS and the legacy endpoint are stateless; they verify whenever.
+            return True
+        return getattr(self._api, "_trusted_device_bridge_state", None) is not None
+
+    def request_2fa(self) -> dict:
+        return self.arm_2fa()
 
     def submit_2fa(self, code: str) -> dict:
-        if self._api is None:
-            raise AuthRequired("Not signed in")
-        if not self._api.validate_2fa_code(code):
-            raise TwoFactorRequired("That code was rejected")
-        if not self._api.is_trusted_session:
+        with self._lock:
+            if self._api is None:
+                raise AuthRequired("Not signed in")
+
+            # Apple's own mail and the Windows autofill both hand over "123 456",
+            # and a stray space is not a wrong code.
+            digits = re.sub(r"\D", "", code or "")
+            if len(digits) != 6:
+                raise TwoFactorRequired(
+                    "Enter the six-digit code Apple sent you.",
+                    data=dict(self._two_factor),
+                )
+
+            if self._delivery_method() == "security_key":
+                raise TwoFactorRequired(
+                    "This Apple ID verifies with a hardware security key, which "
+                    "this app can't prompt for. Sign in at icloud.com once to "
+                    "trust this computer, then try again.",
+                    data=dict(self._two_factor),
+                )
+
+            if not self._challenge_is_armed():
+                # There is genuinely nothing to check against: say so honestly
+                # and put a fresh code in the user's hand, rather than calling
+                # their typing wrong and leaving them to guess.
+                info = self.arm_2fa()
+                raise TwoFactorRequired(
+                    "That code has expired. Apple has sent a new one -- enter "
+                    "the code you just received.",
+                    data=info,
+                )
+
             try:
-                self._api.trust_session()
-            except Exception as exc:  # noqa: BLE001 - non-fatal
-                LOGGER.warning("trust_session failed: %s", exc)
-        self._pending_2fa = False
-        return self.status()
+                accepted = bool(self._api.validate_2fa_code(digits))
+            except Exception as exc:  # noqa: BLE001
+                raise self._classify(exc) from exc
+
+            if not accepted and not self._recover_from_a_false_rejection():
+                raise TwoFactorRequired(
+                    "Apple rejected that code. Check the six digits, or ask for "
+                    "a new code.",
+                    data=dict(self._two_factor),
+                )
+
+            if not self._api.is_trusted_session:
+                try:
+                    self._api.trust_session()
+                except Exception as exc:  # noqa: BLE001 - non-fatal
+                    LOGGER.warning("trust_session failed: %s", exc)
+            self._pending_2fa = False
+            self._two_factor = {}
+            return self.status()
+
+    def _recover_from_a_false_rejection(self) -> bool:
+        """
+        Decide whether a code pyicloud called False was actually fine.
+
+        `validate_2fa_code` returns `not requires_2sa`, and that stays true
+        whenever the trust handshake *after* a correct code did not land -- a
+        slow link, or Apple taking a moment to mark the session trusted. Reported
+        as "wrong code" it sends people round the loop typing codes that were
+        never the problem, and each loop retires the code they were holding.
+
+        A genuinely wrong code never reaches that handshake, and `trust_session`
+        clears pyicloud's own mfa flag before it touches the network -- so the
+        flag still being set is how we know the code itself was refused, and the
+        retry below is skipped rather than costing the user five seconds.
+        """
+        if getattr(self._api, "_requires_mfa", True):
+            return False
+        for delay in (0.0, 1.5, 3.0):
+            if delay:
+                time.sleep(delay)
+            try:
+                if self._api.trust_session() and not self._api.requires_2fa:
+                    return True
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("trust retry failed: %s", exc)
+        return not self._api.requires_2fa
 
     def status(self) -> dict:
         if self._api is None:
@@ -287,11 +536,16 @@ class ICloudClient:
                 # someone who is already signed in.
                 "restoring": self.restoring,
                 "can_restore": self.has_saved_password,
+                "needs_2fa": False,
+                "two_factor": {},
             }
         return {
             "authenticated": self.connected,
             "apple_id": self.apple_id,
             "needs_2fa": bool(self._pending_2fa),
+            # So the gate can go straight to the code box on a session Apple
+            # expired, instead of asking for a password it already has.
+            "two_factor": dict(self._two_factor),
             "trusted_session": bool(getattr(self._api, "is_trusted_session", False)),
             "restoring": self.restoring,
             "can_restore": self.has_saved_password,
@@ -549,14 +803,22 @@ class ICloudClient:
     @staticmethod
     def _classify(exc: Exception) -> SidecarError:
         """Map pyicloud/CloudKit failures onto errors the UI can act on."""
+        # Already ours: classifying it again is how a NetworkError whose detail
+        # happened to mention a 403 turned into "you have been signed out".
+        if isinstance(exc, SidecarError):
+            return exc
+
         name = type(exc).__name__
         text = str(exc)
         if "AcceptTerms" in name or "termsUpdateNeeded" in text:
             return TermsRequired(
                 "Apple requires you to accept updated iCloud terms.", text
             )
-        if "2FA" in name or "RemindersAuthError" in name or "401" in text or "403" in text:
+        if (
+            "2FA" in name
+            or "RemindersAuthError" in name
+            or "FailedLogin" in name
+            or _UNAUTHORIZED.search(text) is not None
+        ):
             return AuthRequired("Your iCloud session expired. Please sign in again.", text)
-        if isinstance(exc, SidecarError):
-            return exc
         return NetworkError("iCloud request failed", text)
