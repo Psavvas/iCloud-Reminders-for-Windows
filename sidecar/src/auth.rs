@@ -1313,7 +1313,7 @@ mod tests {
 
 #[cfg(test)]
 mod two_factor_tests {
-    use super::{AuthClient, TrustedPhone, TwoFactorRoute, classify_code_rejection, is_wrong_code};
+    use super::{AuthClient, TwoFactorRoute, classify_code_rejection, is_wrong_code};
     use serde_json::json;
     use crate::error::AppError;
 

@@ -1,4 +1,12 @@
-#![cfg_attr(not(windows), allow(dead_code, unused_imports))]
+// Everything below `main` is Windows-only, so on other platforms the whole crate
+// is unreachable and `dead_code` fires on all of it.
+//
+// `unused_imports` is deliberately NOT exempted. CI lints on Windows with
+// -D warnings, so anything hidden here is only discovered after a push -- which
+// is exactly how an unused test import got through. Imports that genuinely only
+// serve Windows-only code carry their own `#[cfg(windows)]` instead, which
+// keeps the lint honest on both platforms.
+#![cfg_attr(not(windows), allow(dead_code))]
 
 mod auth;
 mod cache;
@@ -16,7 +24,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(windows)]
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 

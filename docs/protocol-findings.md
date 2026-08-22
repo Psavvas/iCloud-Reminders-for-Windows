@@ -111,3 +111,32 @@ The authentication and record formats need live Windows/account validation
 whenever Apple changes the private service. Tests must use a dedicated account
 and must never log passwords, verification codes, session tokens, record
 contents, or credential-vault values.
+
+## Checking a Windows-only crate from a Linux workspace
+
+The sidecar's `main` and its credential vault are `#[cfg(windows)]`, so on any
+other platform the whole crate is unreachable and `dead_code` fires on all of
+it. The crate exempts that lint off-Windows to stay buildable.
+
+The consequence is that a Linux `cargo clippy` cannot see the lints CI enforces,
+because CI lints on Windows with `-D warnings`. An unused import in a test
+module reached CI that way.
+
+Two things keep it honest:
+
+- `unused_imports` is *not* exempted. Imports that only serve Windows-only code
+  carry their own `#[cfg(windows)]`.
+- The Windows target can be checked from Linux without MSVC by going through
+  mingw, which needs no Apple or Microsoft toolchain:
+
+  ```sh
+  apt-get install -y mingw-w64
+  rustup target add x86_64-pc-windows-gnu
+  cargo clippy --target x86_64-pc-windows-gnu --all-targets \
+      --manifest-path sidecar/Cargo.toml -- -D warnings
+  ```
+
+  This compiles the `cfg(windows)` paths and reports the `dead_code` CI would.
+  `x86_64-pc-windows-msvc` does *not* work here -- `ring`'s build script needs a
+  real MSVC toolchain. Verified to catch a deliberately unused method that the
+  Linux run passes over.
