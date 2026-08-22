@@ -23,6 +23,24 @@ define the behavior the native Rust connector must preserve.
 
 ## Two-factor sign-in
 
+- **Apple's auth server must not be sent the headers its own responses hand
+  back for setup.icloud.com.** `X-Apple-Webauth-Token` and
+  `X-Apple-ID-Account-Country` are values Apple returns for a client to store
+  and replay to `setup.icloud.com`; replaying them to `idmsa.apple.com` makes it
+  answer **409** to every verification request. Neither exists until
+  `signin/complete` has returned a session token, so a client that does this
+  signs in normally right up to the moment a code is involved and then fails at
+  everything -- which reads as "the code is invalid", "Apple would not send a
+  code", and a bare HTTP 409, all from one cause. The header set that works is
+  exactly pyicloud's `_get_auth_headers`: the OAuth/widget headers, the FD
+  client info, `X-Apple-OAuth-State` and `X-Apple-Frame-Id` (both the client
+  id), and whichever of `scnt`, `X-Apple-ID-Session-Id` and
+  `X-Apple-Auth-Attributes` the session holds. Nothing else.
+- `Referer` on auth requests is the idmsa **host** (`https://idmsa.apple.com`),
+  not the auth path. `Origin` stays `https://www.icloud.com`.
+- `Accept` varies per endpoint: `application/json, text/javascript` for the SRP
+  requests, `application/json` for the verification requests, and
+  `application/json, plain/text` for the SMS verifier.
 - `signin/complete` answers **409** when Apple wants a second factor. That
   response also carries the challenge options: `trustedDeviceCount` and
   `trustedPhoneNumbers`. Keep them -- they decide where a code can be sent, and

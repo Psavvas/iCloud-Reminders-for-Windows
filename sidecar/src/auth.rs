@@ -27,7 +27,14 @@ use zeroize::Zeroizing;
 
 use crate::error::{AppError, Result};
 
+const IDMSA_HOST: &str = "https://idmsa.apple.com";
 const IDMSA: &str = "https://idmsa.apple.com/appleauth/auth";
+/// The default for the SRP requests, and what pyicloud sends there.
+const ACCEPT_AUTH: &str = "application/json, text/javascript";
+/// What pyicloud overrides Accept to for every verification request.
+const ACCEPT_JSON: &str = "application/json";
+/// The SMS verifier is the one endpoint pyicloud also offers plain text.
+const ACCEPT_JSON_TEXT: &str = "application/json, plain/text";
 const SETUP: &str = "https://setup.icloud.com/setup/ws/1";
 const WIDGET_KEY: &str =
     "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d";
@@ -223,7 +230,7 @@ impl AuthClient {
         // iCloud's web login first establishes the browser-auth context and
         // cookies used by the two SRP requests. The Python implementation this
         // connector replaced performs the same bootstrap.
-        let auth_headers = self.idmsa_headers()?;
+        let auth_headers = self.idmsa_headers(ACCEPT_AUTH)?;
         let bootstrap = self
             .http
             .get(format!("{IDMSA}/authorize/signin"))
@@ -256,8 +263,7 @@ impl AuthClient {
         let init = self
             .http
             .post(format!("{IDMSA}/signin/init"))
-            .headers(self.idmsa_headers()?)
-            .query(&[("isRememberMeEnabled", "true")])
+            .headers(self.idmsa_headers(ACCEPT_AUTH)?)
             .json(&json!({
                 "accountName": apple_id,
                 "a": B64.encode(&public_bytes),
@@ -277,7 +283,7 @@ impl AuthClient {
         let complete = self
             .http
             .post(format!("{IDMSA}/signin/complete"))
-            .headers(self.idmsa_headers()?)
+            .headers(self.idmsa_headers(ACCEPT_AUTH)?)
             .query(&[("isRememberMeEnabled", "true")])
             .json(&json!({
                 "accountName": apple_id,
@@ -429,7 +435,7 @@ impl AuthClient {
         let response = self
             .http
             .get(format!("{IDMSA}/verify/trusteddevice"))
-            .headers(self.idmsa_headers()?)
+            .headers(self.idmsa_headers(ACCEPT_JSON)?)
             .send()
             .await?;
         self.capture_headers(response.headers());
@@ -475,7 +481,7 @@ impl AuthClient {
         let response = self
             .http
             .put(format!("{IDMSA}/verify/phone"))
-            .headers(self.idmsa_headers()?)
+            .headers(self.idmsa_headers(ACCEPT_JSON)?)
             .json(&json!({"phoneNumber":{"id":phone.id},"mode":mode}))
             .send()
             .await?;
@@ -532,7 +538,7 @@ impl AuthClient {
         let response = self
             .http
             .get(IDMSA)
-            .headers(self.idmsa_headers()?)
+            .headers(self.idmsa_headers(ACCEPT_JSON)?)
             .send()
             .await?;
         self.capture_headers(response.headers());
@@ -615,9 +621,12 @@ impl AuthClient {
                 break;
             }
             eprintln!(
-                "2fa: {} verification returned HTTP {}",
+                "2fa: {} verification returned HTTP {}{}",
                 route.name(),
-                status.as_u16()
+                status.as_u16(),
+                apple_message(&text)
+                    .map(|note| format!(" ({note})"))
+                    .unwrap_or_default()
             );
             // Apple naming the digits as wrong is definitive -- no other route
             // would have taken them either -- and the last route is the last
@@ -629,7 +638,7 @@ impl AuthClient {
         let trust = self
             .http
             .get(format!("{IDMSA}/2sv/trust"))
-            .headers(self.idmsa_headers()?)
+            .headers(self.idmsa_headers(ACCEPT_AUTH)?)
             .send()
             .await?;
         self.capture_headers(trust.headers());
@@ -655,20 +664,22 @@ impl AuthClient {
         route: &TwoFactorRoute,
         code: &str,
     ) -> Result<(reqwest::StatusCode, String)> {
-        let (url, body) = match route {
+        let (url, body, accept) = match route {
             TwoFactorRoute::Sms(id, mode) => (
                 format!("{IDMSA}/verify/phone/securitycode"),
                 json!({"phoneNumber":{"id":id},"securityCode":{"code":code},"mode":mode}),
+                ACCEPT_JSON_TEXT,
             ),
             _ => (
                 format!("{IDMSA}/verify/trusteddevice/securitycode"),
                 json!({"securityCode":{"code":code}}),
+                ACCEPT_JSON,
             ),
         };
         let response = self
             .http
             .post(url)
-            .headers(self.idmsa_headers()?)
+            .headers(self.idmsa_headers(accept)?)
             .json(&body)
             .send()
             .await?;
@@ -681,15 +692,32 @@ impl AuthClient {
         Ok((status, text))
     }
 
-    fn idmsa_headers(&self) -> Result<HeaderMap> {
+    /// Headers for a request to Apple's auth server.
+    ///
+    /// This set is deliberately exactly the one pyicloud sends, because the
+    /// Python sidecar this connector replaced gets through two-factor sign-in
+    /// with it and an earlier version of this function did not.
+    ///
+    /// What it must NOT carry is the interesting part. `X-Apple-Webauth-Token`
+    /// and `X-Apple-ID-Account-Country` are *response* headers -- values Apple
+    /// hands back for the client to store and replay to
+    /// **setup.icloud.com**. Sending them to idmsa made Apple answer 409 to
+    /// every verification request. The timing is what gives it away: neither
+    /// header exists until `signin/complete` returns a session token, so the
+    /// whole sign-in works right up to the moment a code is involved, and then
+    /// nothing does. That is the "code is invalid", the "Apple would not send a
+    /// code", and the plain HTTP 409 -- one cause, three faces.
+    ///
+    /// `Referer` is the idmsa host, not the auth path. pyicloud sends the host.
+    ///
+    /// `Accept` varies per endpoint, so the caller passes it: the security-code
+    /// endpoints are the ones that care.
+    fn idmsa_headers(&self, accept: &'static str) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static("application/json, text/javascript"),
-        );
+        headers.insert(ACCEPT, HeaderValue::from_static(accept));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(ORIGIN, HeaderValue::from_static("https://www.icloud.com"));
-        headers.insert(REFERER, HeaderValue::from_static(IDMSA));
+        headers.insert(REFERER, HeaderValue::from_static(IDMSA_HOST));
         headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
         for (name, value) in [
             ("x-apple-oauth-client-id", WIDGET_KEY),
@@ -706,11 +734,7 @@ impl AuthClient {
                 HeaderValue::from_static(value),
             );
         }
-        insert(
-            &mut headers,
-            "x-apple-oauth-state",
-            &self.state.client_id,
-        )?;
+        insert(&mut headers, "x-apple-oauth-state", &self.state.client_id)?;
         insert(&mut headers, "x-apple-frame-id", &self.state.client_id)?;
         if let Some(attributes) = &self.state.auth_attributes {
             insert(&mut headers, "x-apple-auth-attributes", attributes)?;
@@ -720,12 +744,6 @@ impl AuthClient {
         }
         if let Some(scnt) = &self.state.scnt {
             insert(&mut headers, "scnt", scnt)?;
-        }
-        if let Some(token) = &self.state.session_token {
-            insert(&mut headers, "x-apple-webauth-token", token)?;
-        }
-        if let Some(country) = &self.state.account_country {
-            insert(&mut headers, "x-apple-id-account-country", country)?;
         }
         Ok(headers)
     }
@@ -1476,5 +1494,79 @@ mod two_factor_tests {
 
     fn client() -> AuthClient {
         AuthClient::new(None).expect("an http client builds without a network")
+    }
+
+    // -- the headers Apple's auth server will accept ------------------------
+    //
+    // Reported from a live account: HTTP 409 on every verification request,
+    // while the Python sidecar this connector replaced signs in fine. The
+    // difference was two headers.
+    //
+    // `X-Apple-Webauth-Token` and `X-Apple-ID-Account-Country` are things Apple
+    // *sends back* for a client to store and replay to setup.icloud.com. This
+    // code was replaying them to idmsa as well. Neither exists until
+    // `signin/complete` has returned a session token, which is why sign-in
+    // worked right up to the point a code was involved and then never did.
+
+    fn headers_with_a_live_session() -> reqwest::header::HeaderMap {
+        let mut auth = client();
+        auth.state.session_token = Some("a-web-auth-token".into());
+        auth.state.account_country = Some("GBR".into());
+        auth.state.session_id = Some("a-session-id".into());
+        auth.state.scnt = Some("a-scnt".into());
+        auth.state.auth_attributes = Some("attributes".into());
+        auth.idmsa_headers(super::ACCEPT_JSON)
+            .expect("headers build")
+    }
+
+    #[test]
+    fn the_auth_server_is_never_sent_a_setup_credential() {
+        let headers = headers_with_a_live_session();
+        assert!(
+            !headers.contains_key("x-apple-webauth-token"),
+            "the session token belongs to setup.icloud.com; idmsa answers 409 to it"
+        );
+        assert!(
+            !headers.contains_key("x-apple-id-account-country"),
+            "another response header that must not be replayed to idmsa"
+        );
+    }
+
+    #[test]
+    fn the_challenge_headers_apple_does_want_are_all_present() {
+        let headers = headers_with_a_live_session();
+        // Without these three Apple cannot tell which challenge is being
+        // answered, and rotating them is the other half of the same bug.
+        assert_eq!(headers["scnt"], "a-scnt");
+        assert_eq!(headers["x-apple-id-session-id"], "a-session-id");
+        assert_eq!(headers["x-apple-auth-attributes"], "attributes");
+        assert_eq!(headers["x-apple-widget-key"], super::WIDGET_KEY);
+        assert_eq!(headers["x-apple-oauth-client-type"], "firstPartyAuth");
+    }
+
+    #[test]
+    fn the_referer_is_the_idmsa_host_not_the_auth_path() {
+        let headers = headers_with_a_live_session();
+        assert_eq!(headers["referer"], "https://idmsa.apple.com");
+    }
+
+    #[test]
+    fn accept_is_whatever_the_endpoint_being_called_wants() {
+        let mut auth = client();
+        auth.state.session_id = Some("s".into());
+        // The SRP requests and the verification requests do not agree, and
+        // pyicloud varies it per endpoint rather than sending one value.
+        assert_eq!(
+            auth.idmsa_headers(super::ACCEPT_AUTH).expect("headers")["accept"],
+            "application/json, text/javascript"
+        );
+        assert_eq!(
+            auth.idmsa_headers(super::ACCEPT_JSON).expect("headers")["accept"],
+            "application/json"
+        );
+        assert_eq!(
+            auth.idmsa_headers(super::ACCEPT_JSON_TEXT).expect("headers")["accept"],
+            "application/json, plain/text"
+        );
     }
 }
