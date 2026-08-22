@@ -75,6 +75,8 @@ pub struct Service {
 pub struct TrustedPhone {
     pub id: i64,
     pub push_mode: String,
+    /// Apple sends this on some numbers and expects it echoed back.
+    pub non_fteu: Option<bool>,
     /// Apple's own masked rendering, e.g. "+44 ••••• ••123". Never a full number.
     pub masked: String,
 }
@@ -91,6 +93,17 @@ pub enum TwoFactorRoute {
     Unknown,
     TrustedDevice,
     Sms(i64, String),
+}
+
+impl TrustedPhone {
+    /// The nested `phoneNumber` payload Apple's SMS endpoints expect.
+    fn payload(&self) -> Value {
+        let mut payload = json!({"id": self.id});
+        if let Some(non_fteu) = self.non_fteu {
+            payload["nonFTEU"] = Value::Bool(non_fteu);
+        }
+        payload
+    }
 }
 
 impl TwoFactorRoute {
@@ -415,21 +428,23 @@ impl AuthClient {
 
     /// Ask Apple to deliver a verification code, and remember how it went out.
     ///
-    /// Two things here are load-bearing, and the app was doing neither.
+    /// Prefers a text, which is a deliberate downgrade in polish for the sake of
+    /// working at all. Apple has moved trusted-device verification to its HSA2
+    /// *bridge*, and this connector cannot complete that exchange -- see
+    /// `post_code`. The texted code goes to a different endpoint that is plain
+    /// HTTP, so it is the only route that can actually be finished here.
     ///
-    /// First, `&mut self`. Apple rotates `scnt` on every response from the auth
-    /// endpoint and refuses any later request that echoes a stale one. This used
-    /// to take `&self` and so *could not* record the rotation, which meant the
-    /// code submission that followed carried a dead `scnt` -- and Apple's answer
-    /// to that is indistinguishable from a wrong code.
-    ///
-    /// Second, the fallback. `verify/trusteddevice` only works for an account
-    /// with a device to push to. An account whose second factor is a phone
-    /// number got a failure that the sign-in screen swallowed, and then no code
-    /// it could ever accept.
+    /// `&mut self` is also load-bearing: Apple rotates `scnt` on every response
+    /// from the auth endpoint and refuses any later request that echoes a stale
+    /// one, and its answer to a stale `scnt` is indistinguishable from a wrong
+    /// code.
     pub async fn request_2fa(&mut self) -> Result<Value> {
-        // No device to push to means the phone is the only route there is.
-        if self.trusted_device_count == 0 && !self.phones.is_empty() {
+        // A text is preferred whenever Apple has a number for it -- see
+        // `post_code` for why the trusted-device prompt is a dead end here.
+        if self.phones.is_empty() && !self.options_loaded {
+            self.load_auth_options().await?;
+        }
+        if !self.phones.is_empty() {
             return self.request_sms_code().await;
         }
         let response = self
@@ -482,7 +497,7 @@ impl AuthClient {
             .http
             .put(format!("{IDMSA}/verify/phone"))
             .headers(self.idmsa_headers(ACCEPT_JSON)?)
-            .json(&json!({"phoneNumber":{"id":phone.id},"mode":mode}))
+            .json(&json!({"phoneNumber": phone.payload(), "mode": mode}))
             .send()
             .await?;
         self.capture_headers(response.headers());
@@ -574,6 +589,7 @@ impl AuthClient {
                         .and_then(Value::as_str)
                         .unwrap_or("sms")
                         .to_owned(),
+                    non_fteu: entry.get("nonFTEU").and_then(Value::as_bool),
                     // Apple's own masked rendering. Never store the real number.
                     masked: entry
                         .get("numberWithDialCode")
@@ -628,6 +644,23 @@ impl AuthClient {
                     .map(|note| format!(" ({note})"))
                     .unwrap_or_default()
             );
+            if Self::is_wrong_verifier(route, status.as_u16()) {
+                // Not the user's typing, and not a code that can be re-sent.
+                // Say so plainly and point at the route that does work.
+                return Err(AppError::TwoFactorRequired {
+                    message: if self.phones.is_empty() {
+                        "Apple verifies this account through a device prompt that this app \
+                         can't complete yet, and there is no trusted phone number to text \
+                         instead. Add one at appleid.apple.com and try again."
+                            .into()
+                    } else {
+                        "Apple won't verify a device code from this app. Choose \
+                         \"Text me a code\" and enter the code from the message instead."
+                            .into()
+                    },
+                    detail: safe_detail(&text),
+                });
+            }
             // Apple naming the digits as wrong is definitive -- no other route
             // would have taken them either -- and the last route is the last
             // chance regardless.
@@ -667,7 +700,16 @@ impl AuthClient {
         let (url, body, accept) = match route {
             TwoFactorRoute::Sms(id, mode) => (
                 format!("{IDMSA}/verify/phone/securitycode"),
-                json!({"phoneNumber":{"id":id},"securityCode":{"code":code},"mode":mode}),
+                json!({
+                    "phoneNumber": self
+                        .phones
+                        .iter()
+                        .find(|phone| phone.id == *id)
+                        .map(TrustedPhone::payload)
+                        .unwrap_or_else(|| json!({"id": id})),
+                    "securityCode": {"code": code},
+                    "mode": mode,
+                }),
                 ACCEPT_JSON_TEXT,
             ),
             _ => (
@@ -690,6 +732,30 @@ impl AuthClient {
         let status = response.status();
         let text = bounded_response_text(response).await?;
         Ok((status, text))
+    }
+
+    /// Whether a refusal is Apple saying this verifier is not the one to use.
+    ///
+    /// Apple has moved trusted-device verification for most accounts to its
+    /// HSA2 *bridge*: the client opens a websocket to Apple's push service,
+    /// takes a push token, posts `auth/bridge/step/0`, waits for a pushed
+    /// challenge, and answers it with an SRP-style prover exchange. pyicloud
+    /// implements all of that in about 2,300 lines and picks it whenever Apple's
+    /// boot data says `authInitialRoute == "auth/bridge/step"`; it only falls
+    /// back to `verify/trusteddevice/securitycode` for accounts Apple has left
+    /// on the old verifier.
+    ///
+    /// This connector has no bridge. So for an account Apple has moved, the
+    /// legacy verifier is the wrong door and Apple answers 409 -- while still
+    /// happily displaying the prompt on the user's devices, which is what made
+    /// this look like a code problem for so long. It is not: no six digits would
+    /// ever have worked on that endpoint.
+    ///
+    /// The texted code is a different endpoint and plain HTTP, so it is the way
+    /// through until the bridge exists.
+    fn is_wrong_verifier(route: &TwoFactorRoute, status: u16) -> bool {
+        matches!(route, TwoFactorRoute::TrustedDevice | TwoFactorRoute::Unknown)
+            && status == 409
     }
 
     /// Headers for a request to Apple's auth server.
@@ -1247,7 +1313,8 @@ mod tests {
 
 #[cfg(test)]
 mod two_factor_tests {
-    use super::{AuthClient, TwoFactorRoute, classify_code_rejection, is_wrong_code};
+    use super::{AuthClient, TrustedPhone, TwoFactorRoute, classify_code_rejection, is_wrong_code};
+    use serde_json::json;
     use crate::error::AppError;
 
     #[test]
@@ -1494,6 +1561,67 @@ mod two_factor_tests {
 
     fn client() -> AuthClient {
         AuthClient::new(None).expect("an http client builds without a network")
+    }
+
+    // -- the verifier Apple actually wants ---------------------------------
+    //
+    // Four rounds of "the code is invalid" on a live account, while the Python
+    // sidecar this connector replaced signs in fine, came down to this: Apple
+    // has three verifiers and this code has two.
+    //
+    // Trusted-device verification has moved to Apple's HSA2 bridge -- a
+    // websocket to its push service, a pushed challenge, and an SRP-style
+    // prover exchange, about 2,300 lines of it in pyicloud. Without that, the
+    // legacy `verify/trusteddevice/securitycode` endpoint answers 409 for an
+    // account Apple has moved, while still cheerfully displaying the prompt on
+    // the user's devices. No six digits would ever have worked there.
+
+    #[test]
+    fn a_409_from_the_device_verifier_is_the_wrong_door_not_a_wrong_code() {
+        assert!(AuthClient::is_wrong_verifier(&TwoFactorRoute::TrustedDevice, 409));
+        assert!(AuthClient::is_wrong_verifier(&TwoFactorRoute::Unknown, 409));
+    }
+
+    #[test]
+    fn an_ordinary_refusal_is_not_mistaken_for_the_wrong_door() {
+        // A mistyped code, and a texted code Apple simply did not like, both
+        // stay the user's problem to retry rather than a dead end.
+        assert!(!AuthClient::is_wrong_verifier(&TwoFactorRoute::TrustedDevice, 400));
+        assert!(!AuthClient::is_wrong_verifier(
+            &TwoFactorRoute::Sms(2, "sms".into()),
+            409
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_text_is_preferred_because_it_is_the_route_that_can_finish() {
+        // The device prompt is the nicer experience and completely useless
+        // here: the code it shows cannot be verified without the bridge.
+        let mut auth = client();
+        auth.trusted_device_count = 3;
+        auth.options_loaded = true;
+        auth.note_auth_options(r#"{"trustedPhoneNumbers":[{"id":2,"pushMode":"sms"}]}"#);
+
+        // No network in a unit test, so the call fails -- the assertion is
+        // about which route it committed to, decided before any request.
+        let _ = auth.request_2fa().await;
+        assert!(
+            !matches!(auth.route, TwoFactorRoute::TrustedDevice),
+            "a trusted device must not win over a route that can actually finish"
+        );
+    }
+
+    #[test]
+    fn the_phone_payload_matches_the_one_apple_is_given_by_pyicloud() {
+        let mut auth = client();
+        auth.note_auth_options(
+            r#"{"trustedPhoneNumbers":[{"id":2,"pushMode":"sms","nonFTEU":true}]}"#,
+        );
+        assert_eq!(auth.phones[0].payload(), json!({"id":2,"nonFTEU":true}));
+
+        // Absent means absent, not false -- Apple is picky about echoed fields.
+        auth.note_auth_options(r#"{"trustedPhoneNumbers":[{"id":3,"pushMode":"sms"}]}"#);
+        assert_eq!(auth.phones[0].payload(), json!({"id":3}));
     }
 
     // -- the headers Apple's auth server will accept ------------------------

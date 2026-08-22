@@ -99,7 +99,7 @@ getting-started guide for signing and Store identity options.
 | Search and sorting | Local SQLite queries; the network is not on the click path |
 | Tags | Read and filter only (an upstream iCloud limitation) |
 | Offline use | Full reads; edits queue and push after reconnecting |
-| Authentication | Apple ID, 2FA by trusted device or text, terms acceptance and session restoration |
+| Authentication | Apple ID, 2FA by text message, terms acceptance and session restoration |
 | Conflicts | Preserved and explicitly resolved instead of overwritten |
 | Windows integration | Native theme, controls, badges and due notifications |
 | Sidebar | Persisted open/collapsed state with temporary hover expansion |
@@ -108,6 +108,11 @@ Creating or changing reminder lists is not supported because records created
 through CloudKit Web Services do not propagate to Apple devices. The live
 protocol findings are documented in
 [docs/protocol-findings.md](docs/protocol-findings.md).
+
+Two-factor sign-in uses a texted code. Apple verifies the code shown in a
+trusted-device prompt through an HSA2 websocket bridge that this connector does
+not implement yet, so an account with no trusted phone number cannot currently
+finish signing in -- see the protocol findings for what porting it involves.
 
 ## Architecture
 

@@ -23,6 +23,29 @@ define the behavior the native Rust connector must preserve.
 
 ## Two-factor sign-in
 
+- **Apple has three verifiers; this connector implements two.** Trusted-device
+  verification has moved to Apple's HSA2 **bridge**: the client opens a
+  websocket to `websocket.push.apple.com`, takes an APNs push token, posts
+  `auth/bridge/step/0`, waits for a pushed challenge, and answers it with an
+  SRP-style prover exchange. pyicloud implements that in about 2,300 lines
+  (`hsa2_bridge.py`, `hsa2_bridge_prover.py`) and selects it whenever Apple's
+  boot data says `authInitialRoute == "auth/bridge/step"`, falling back to
+  `POST verify/trusteddevice/securitycode` only for accounts Apple has left on
+  the old verifier.
+
+  For an account Apple has moved, that legacy endpoint answers **409** -- while
+  Apple still displays the prompt on the user's devices, which is what makes it
+  look like a code problem. It is not. No six digits will ever be accepted
+  there. This was misdiagnosed three times as a header problem, a delivery
+  problem, and a routing problem before the missing verifier was the answer.
+
+  `POST verify/phone/securitycode` is a different endpoint, plain HTTP, and
+  needs no bridge -- so a texted code is the only route this connector can
+  currently complete, and `request_2fa` prefers it whenever Apple lists a
+  trusted number. Restoring the device prompt means porting the bridge.
+- The `phoneNumber` payload is `{"id": <id>}` plus `"nonFTEU"` only when Apple
+  included it. Both `PUT verify/phone` and `POST verify/phone/securitycode`
+  take the same shape.
 - **Apple's auth server must not be sent the headers its own responses hand
   back for setup.icloud.com.** `X-Apple-Webauth-Token` and
   `X-Apple-ID-Account-Country` are values Apple returns for a client to store
