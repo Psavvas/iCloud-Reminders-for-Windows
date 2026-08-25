@@ -74,6 +74,20 @@ session state uses the Windows-native credential backend.
 
 ## Residual risks and release blockers
 
+0. **Two-factor sign-in is a functional regression against the Python sidecar,
+   and it is shipping that way deliberately.** Apple verifies trusted-device
+   prompts through its HSA2 bridge; pyicloud implements that in roughly 2,300
+   lines, so `main` supported device prompts by inheriting it from a dependency.
+   This connector implements only the two plain-HTTP verifiers, so a **texted
+   code is the only route that completes a sign-in**, and an Apple ID with no
+   trusted phone number cannot sign in at all.
+
+   This is documented in the README, the getting-started guide, and the release
+   notes, and the app reports the specific `409` as a wrong route rather than a
+   wrong code. Anyone migrating from a `main` build should be told before they
+   upgrade. See `docs/protocol-findings.md` for what porting the bridge
+   involves.
+
 1. **Live-account validation is still required.** 2FA, trust, terms acceptance,
    CloudKit record shapes, conflict behavior, and all due-date timezone cases
    must be exercised with a dedicated test account. Start with read-only sync;

@@ -185,6 +185,19 @@ jobs:
             artifacts/**/*.msix
           fail_on_unmatched_files: true
           body: |
+            ## Before you sign in: two-factor works by text only
+
+            When Apple asks for a verification code, use **Text me a code** and
+            enter the code from the SMS. The six digits shown in the prompt on
+            your iPhone, iPad or Mac **will not be accepted** -- Apple verifies
+            those through a channel this app does not implement yet, and it
+            keeps displaying the prompt regardless, so a device code looks
+            correct and is refused every time.
+
+            If your Apple ID has **no trusted phone number**, sign-in cannot
+            complete at all in this release. Add a number at
+            [appleid.apple.com](https://appleid.apple.com) first.
+
             ## Installing
 
             Download **Reminders-for-Windows-x64-Setup.exe** (or `arm64` on an

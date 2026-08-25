@@ -162,8 +162,42 @@ dotnet build .\src-windows\Reminders.WinUI\Reminders.WinUI.csproj -c Release -p:
 The Rust tests do not require an iCloud account. Demo mode is the safe path for
 interactive frontend testing.
 
+## Signing in with two-factor authentication
+
+**Only a texted code can complete sign-in.** When the verification screen
+appears, choose **Text me a code** and enter the code from the message.
+
+The six digits Apple shows in the prompt on a trusted iPhone, iPad or Mac are
+verified through Apple's HSA2 *bridge* — a websocket exchange this connector
+does not implement. For accounts Apple has moved to it, the legacy endpoint
+answers `409` while Apple goes on displaying the prompt, so a device code looks
+correct and is rejected every time. It is not a typing mistake and no code will
+ever work there. The app detects that specific refusal and says so rather than
+blaming the code.
+
+The app asks for a text automatically whenever Apple lists a trusted number, so
+in the normal case there is nothing to choose.
+
+**An Apple ID with no trusted phone number cannot finish signing in.** The
+device prompt is then the only route Apple offers, and it is the one that does
+not work. Add a phone number at [appleid.apple.com](https://appleid.apple.com),
+or see [protocol-findings.md](protocol-findings.md) for what porting the bridge
+involves — pyicloud implements it in roughly 2,300 lines, which is how the
+previous Python sidecar supported device prompts.
+
+A few behaviours that look like bugs and are not:
+
+- **Requesting a text retires the previous code.** Only ask for one when you
+  actually want a new code; the older one stops working.
+- **Apple answers the "send a code" request with a non-2xx status and sends the
+  code anyway.** A failure there does not mean nothing arrived.
+- **You can legitimately hold two live codes at once** if both routes delivered.
+  Use the texted one.
+
 ## Troubleshooting
 
+- Sign-in problems involving a verification code are almost always the
+  device-prompt limitation above, not a bad password.
 - If PowerShell blocks local scripts, use:
   `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-windows.ps1 -Demo`
 - Application diagnostics are written to
