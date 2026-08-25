@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 
 namespace Reminders.Windows.Services;
@@ -35,6 +36,15 @@ public sealed class SidecarClient : IAsyncDisposable
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            // The sidecar reads and writes UTF-8. Without these, .NET decodes
+            // the pipes with the console's ANSI code page, so every non-ASCII
+            // character arrives mangled -- reminder titles, notes and list
+            // names as much as the bullets in a masked phone number. Encode
+            // without a BOM: a preamble on stdin would corrupt the first
+            // request line.
+            StandardOutputEncoding = new UTF8Encoding(false),
+            StandardErrorEncoding = new UTF8Encoding(false),
+            StandardInputEncoding = new UTF8Encoding(false),
             WorkingDirectory = Path.GetDirectoryName(executable)!,
         };
         start.ArgumentList.Add("--data-dir");

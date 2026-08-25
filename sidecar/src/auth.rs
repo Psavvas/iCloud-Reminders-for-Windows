@@ -1112,16 +1112,25 @@ fn classify_code_rejection(status: u16, body: &str) -> AppError {
             detail,
         };
     }
+    // Past this point the refusal is ambiguous: it can equally mean the code
+    // was fine and the challenge or the route was not. So do not send the user
+    // to "get a new code" -- requesting a text retires the code they are
+    // holding, which turns a recoverable state into a lost one. Point at the
+    // newest code first, and make the cost of asking for another explicit.
     if let Some(message) = apple_message(body) {
         return AppError::TwoFactorRequired {
-            message: format!("{message} If that code was right, ask for a new one."),
+            message: format!(
+                "{message} If you have received more than one code, use the one from the \
+                 most recent message."
+            ),
             detail,
         };
     }
     AppError::TwoFactorRequired {
         message: format!(
-            "Apple would not accept that code (HTTP {status}). Ask for a new one and \
-             enter that instead."
+            "Apple refused that code without saying why (HTTP {status}). If more than one \
+             code has arrived, enter the one from the most recent message. Asking for a new \
+             code cancels the one you have, so try that only if the newest code also fails."
         ),
         detail,
     }
@@ -1492,7 +1501,39 @@ mod two_factor_tests {
         let AppError::TwoFactorRequired { message, .. } = error else {
             panic!("wrong variant");
         };
-        assert!(message.contains("Ask for a new one"), "{message}");
+        assert!(message.contains("most recent message"), "{message}");
+    }
+
+    /// An ambiguous refusal must not steer the user into requesting a new
+    /// code: that retires the code they are holding, so if the real problem
+    /// was the challenge or the route, following the advice destroys the one
+    /// thing that still might have worked. Only `-21669` is Apple saying the
+    /// digits were wrong.
+    #[test]
+    fn an_ambiguous_rejection_does_not_push_the_destructive_action() {
+        for body in ["", "{}", r#"{"serviceErrors":[{"code":"-20101"}]}"#] {
+            let AppError::TwoFactorRequired { message, .. } = classify_code_rejection(409, body)
+            else {
+                panic!("wrong variant");
+            };
+            assert!(
+                !message.contains("Ask for a new one and enter that instead"),
+                "ambiguous refusal told the user to retire their code: {message}"
+            );
+            assert!(
+                message.contains("most recent message"),
+                "ambiguous refusal should point at the newest code: {message}"
+            );
+        }
+
+        // A code Apple explicitly names as wrong is the one case where asking
+        // for a new one is the right advice.
+        let AppError::TwoFactorRequired { message, .. } =
+            classify_code_rejection(409, r#"{"service_errors":[{"code":"-21669"}]}"#)
+        else {
+            panic!("wrong variant");
+        };
+        assert!(message.contains("ask for a new code"), "{message}");
     }
 
     #[test]
