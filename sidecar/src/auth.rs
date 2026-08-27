@@ -540,12 +540,13 @@ impl AuthClient {
         // Logged so this is diagnosable from the app log rather than guessed at:
         // Apple's exact status for these endpoints is not documented anywhere.
         eprintln!(
-            "2fa: {route} delivery returned HTTP {status}{} {}",
+            "2fa: {route} delivery returned HTTP {status}{} {} {}",
             self.notice
                 .as_deref()
                 .map(|note| format!(" ({note})"))
                 .unwrap_or_default(),
-            self.session_stamp()
+            self.session_stamp(),
+            body_shape(body)
         );
         if matches!(status, 401 | 403 | 421) {
             return Err(AppError::AuthRequired {
@@ -666,6 +667,7 @@ impl AuthClient {
                 stamp_at_send,
                 self.session_stamp()
             );
+            eprintln!("2fa:   {}", body_shape(&text));
             if Self::is_wrong_verifier(route, status.as_u16()) {
                 // Not the user's typing, and not a code that can be re-sent.
                 // Say so plainly and point at the route that does work.
@@ -1120,6 +1122,53 @@ fn apple_message(body: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether to write Apple's raw error bodies to the log.
+///
+/// Off by default: these bodies are Apple's, not ours, and a diagnostic aid is
+/// not a reason to put them on every user's disk. Set
+/// `REMINDERS_LOG_APPLE_BODIES=1` to enable it for one reproduction.
+fn log_apple_bodies() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("REMINDERS_LOG_APPLE_BODIES")
+            .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
+    })
+}
+
+/// A description of a response body safe to log unconditionally.
+///
+/// Field *names* say which schema Apple answered with, which is what
+/// distinguishes "refused with a reason we failed to read" from "refused with
+/// no reason at all" -- and neither is inferable from the status code. Values
+/// are only included when `REMINDERS_LOG_APPLE_BODIES` is set.
+fn body_shape(body: &str) -> String {
+    if body.trim().is_empty() {
+        return "body: empty".to_owned();
+    }
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return format!("body: {} bytes, not JSON", body.len());
+    };
+    let shape = match &value {
+        Value::Object(map) if map.is_empty() => "body: {} (no fields)".to_owned(),
+        Value::Object(map) => format!(
+            "body fields: {}",
+            map.keys().take(12).cloned().collect::<Vec<_>>().join(", ")
+        ),
+        other => format!("body: bare {}", match other {
+            Value::Null => "null",
+            Value::Bool(_) => "bool",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }),
+    };
+    if log_apple_bodies() {
+        return format!("{shape} | raw: {}", body.chars().take(600).collect::<String>());
+    }
+    shape
 }
 
 /// Apple's numeric service-error code, when it gave one. Diagnostic only --
@@ -1821,5 +1870,35 @@ mod diagnostic_tests {
             assert_eq!(apple_message(body), None, "{body}");
             assert_eq!(apple_error_code(body), None, "{body}");
         }
+    }
+}
+
+#[cfg(test)]
+mod body_shape_tests {
+    use super::body_shape;
+
+    #[test]
+    fn an_empty_or_fieldless_body_is_named_as_such() {
+        // The bare 409 seen live. Distinguishing "no fields" from "fields we
+        // failed to read" is the whole point: only one of them is our bug.
+        assert_eq!(body_shape(""), "body: empty");
+        assert_eq!(body_shape("   "), "body: empty");
+        assert_eq!(body_shape("{}"), "body: {} (no fields)");
+    }
+
+    #[test]
+    fn field_names_are_reported_without_their_values() {
+        let shape = body_shape(r#"{"serviceErrors":[{"code":"-21669"}],"hasError":true}"#);
+        assert!(shape.contains("serviceErrors"), "{shape}");
+        assert!(shape.contains("hasError"), "{shape}");
+        // Values stay out unless the operator opts in.
+        assert!(!shape.contains("-21669"), "{shape}");
+    }
+
+    #[test]
+    fn a_non_json_body_reports_its_size_only() {
+        let shape = body_shape("<html>Access Denied</html>");
+        assert!(shape.contains("not JSON"), "{shape}");
+        assert!(!shape.contains("Access Denied"), "{shape}");
     }
 }
