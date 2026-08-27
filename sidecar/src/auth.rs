@@ -636,13 +636,20 @@ impl AuthClient {
                 self.route = route.clone();
                 break;
             }
+            // Log Apple's error code as well as its message. A refusal that
+            // carries neither -- the bare 409 -- is the ambiguous case, and
+            // without the code there is nothing in the log to tell it apart
+            // from any other refusal afterwards.
             eprintln!(
                 "2fa: {} verification returned HTTP {}{}",
                 route.name(),
                 status.as_u16(),
-                apple_message(&text)
-                    .map(|note| format!(" ({note})"))
-                    .unwrap_or_default()
+                match (apple_message(&text), apple_error_code(&text)) {
+                    (Some(note), Some(code)) => format!(" ({note} [{code}])"),
+                    (Some(note), None) => format!(" ({note})"),
+                    (None, Some(code)) => format!(" (code {code})"),
+                    (None, None) => " (no reason given)".to_owned(),
+                }
             );
             if Self::is_wrong_verifier(route, status.as_u16()) {
                 // Not the user's typing, and not a code that can be re-sent.
@@ -1080,6 +1087,23 @@ fn apple_message(body: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Apple's numeric service-error code, when it gave one. Diagnostic only --
+/// `-21669` is the wrong-digits signal, everything else is ambiguous and is
+/// worth having in the log precisely because it cannot be acted on blindly.
+fn apple_error_code(body: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(body).ok()?;
+    let code = value
+        .pointer("/service_errors/0/code")
+        .or_else(|| value.pointer("/serviceErrors/0/code"))?;
+    match code {
+        Value::String(text) if !text.trim().is_empty() => {
+            Some(text.trim().chars().take(40).collect())
+        }
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
 }
 
 /// Whether Apple said, in as many words, that the digits were wrong.
@@ -1737,5 +1761,32 @@ mod two_factor_tests {
             auth.idmsa_headers(super::ACCEPT_JSON_TEXT).expect("headers")["accept"],
             "application/json, plain/text"
         );
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::{apple_error_code, apple_message};
+
+    #[test]
+    fn an_error_code_is_read_as_string_or_number() {
+        assert_eq!(
+            apple_error_code(r#"{"service_errors":[{"code":"-21669"}]}"#).as_deref(),
+            Some("-21669")
+        );
+        assert_eq!(
+            apple_error_code(r#"{"serviceErrors":[{"code":-20101}]}"#).as_deref(),
+            Some("-20101")
+        );
+    }
+
+    #[test]
+    fn a_refusal_with_no_reason_yields_neither_message_nor_code() {
+        // The bare 409 seen on a live account: this is the shape that used to
+        // leave nothing in the log to distinguish it by.
+        for body in ["", "{}", r#"{"serviceErrors":[]}"#] {
+            assert_eq!(apple_message(body), None, "{body}");
+            assert_eq!(apple_error_code(body), None, "{body}");
+        }
     }
 }

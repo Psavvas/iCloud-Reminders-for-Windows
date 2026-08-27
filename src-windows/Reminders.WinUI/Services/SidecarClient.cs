@@ -83,7 +83,20 @@ public sealed class SidecarClient : IAsyncDisposable
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(90));
         using var registration = timeout.Token.Register(() => completion.TrySetCanceled(timeout.Token));
-        try { return await completion.Task; } finally { _pending.TryRemove(id, out _); }
+        try { return await completion.Task; }
+        catch (SidecarException error)
+        {
+            // A failed call previously reached the user's screen and nowhere
+            // else, which left sign-in problems with no evidence to look at
+            // afterwards. Record the method and the error only: `parameters`
+            // carries the password on login and the verification code on
+            // submit_2fa, and must never be written to disk. `detail` is
+            // already reduced to Apple's public error fields by the sidecar.
+            var detail = string.IsNullOrEmpty(error.Detail) ? "" : $" | {error.Detail}";
+            AppLog.Info($"call '{method}' failed: {error.Code}: {error.Message}{detail}");
+            throw;
+        }
+        finally { _pending.TryRemove(id, out _); }
     }
 
     private async Task ReadOutputAsync(StreamReader reader, CancellationToken cancellationToken)
