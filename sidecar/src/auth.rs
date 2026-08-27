@@ -158,6 +158,11 @@ pub struct AuthClient {
     /// Without this, an account with no phone number re-fetches them on every
     /// attempt to text a code that was never going to be possible.
     options_loaded: bool,
+    /// How many times Apple has rotated `scnt` / `x-apple-id-session-id`.
+    /// Values are session credentials and must never be logged; a counter says
+    /// whether a request rotated them, which is what diagnosis needs.
+    scnt_generation: u32,
+    session_generation: u32,
 }
 
 impl AuthClient {
@@ -184,6 +189,8 @@ impl AuthClient {
             sent_on: Vec::new(),
             notice: None,
             options_loaded: false,
+            scnt_generation: 0,
+            session_generation: 0,
         })
     }
 
@@ -533,11 +540,12 @@ impl AuthClient {
         // Logged so this is diagnosable from the app log rather than guessed at:
         // Apple's exact status for these endpoints is not documented anywhere.
         eprintln!(
-            "2fa: {route} delivery returned HTTP {status}{}",
+            "2fa: {route} delivery returned HTTP {status}{} {}",
             self.notice
                 .as_deref()
                 .map(|note| format!(" ({note})"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            self.session_stamp()
         );
         if matches!(status, 401 | 403 | 421) {
             return Err(AppError::AuthRequired {
@@ -631,6 +639,7 @@ impl AuthClient {
         }
 
         for (index, route) in routes.iter().enumerate() {
+            let stamp_at_send = self.session_stamp();
             let (status, text) = self.post_code(route, code).await?;
             if status.is_success() {
                 self.route = route.clone();
@@ -640,8 +649,12 @@ impl AuthClient {
             // carries neither -- the bare 409 -- is the ambiguous case, and
             // without the code there is nothing in the log to tell it apart
             // from any other refusal afterwards.
+            // `sent` is the stamp the code was requested under; `now` is the
+            // stamp this attempt was sent under. If they differ, Apple rotated
+            // the session between delivery and verification -- which is the
+            // shape of a refusal that is about session state, not the digits.
             eprintln!(
-                "2fa: {} verification returned HTTP {}{}",
+                "2fa: {} verification returned HTTP {}{} sent{} now{}",
                 route.name(),
                 status.as_u16(),
                 match (apple_message(&text), apple_error_code(&text)) {
@@ -649,7 +662,9 @@ impl AuthClient {
                     (Some(note), None) => format!(" ({note})"),
                     (None, Some(code)) => format!(" (code {code})"),
                     (None, None) => " (no reason given)".to_owned(),
-                }
+                },
+                stamp_at_send,
+                self.session_stamp()
             );
             if Self::is_wrong_verifier(route, status.as_u16()) {
                 // Not the user's typing, and not a code that can be re-sent.
@@ -841,6 +856,8 @@ impl AuthClient {
     }
 
     fn capture_headers(&mut self, headers: &HeaderMap) {
+        let previous_session = self.state.session_id.clone();
+        let previous_scnt = self.state.scnt.clone();
         self.state.session_id =
             header(headers, "x-apple-id-session-id").or(self.state.session_id.take());
         self.state.session_token =
@@ -852,6 +869,22 @@ impl AuthClient {
             header(headers, "x-apple-id-account-country").or(self.state.account_country.take());
         self.state.trust_token =
             header(headers, "x-apple-twosv-trust-token").or(self.state.trust_token.take());
+        if self.state.session_id != previous_session {
+            self.session_generation = self.session_generation.saturating_add(1);
+        }
+        if self.state.scnt != previous_scnt {
+            self.scnt_generation = self.scnt_generation.saturating_add(1);
+        }
+    }
+
+    /// A leak-free fingerprint of the session credentials in play, for logs.
+    /// Two lines sharing a stamp were sent with the same `scnt` and session id;
+    /// a change between them means Apple rotated one mid-exchange.
+    fn session_stamp(&self) -> String {
+        format!(
+            "[scnt#{} sid#{}]",
+            self.scnt_generation, self.session_generation
+        )
     }
 }
 
