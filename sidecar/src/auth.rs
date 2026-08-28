@@ -351,6 +351,11 @@ impl AuthClient {
                     self.route = TwoFactorRoute::TrustedDevice;
                 }
                 self.notice = apple_message(&body);
+                // Everything pyicloud does before the user is asked for a
+                // code. Skipping it left Apple's side of the challenge
+                // unadvanced, which is why verification came back with the
+                // challenge document instead of a verdict.
+                self.prime_two_factor().await;
             }
             return Err(error);
         }
@@ -514,26 +519,19 @@ impl AuthClient {
                     .into(),
                 detail: String::new(),
             })?;
-        // pyicloud's precedence: the mode Apple names on the challenge wins
-        // over the phone's own pushMode. The route stores whichever is used so
-        // verification echoes exactly what delivery was asked for.
-        let mode = self
-            .challenge_mode
-            .clone()
-            .filter(|mode| !mode.trim().is_empty())
-            .or_else(|| Some(phone.push_mode.clone()).filter(|m| !m.is_empty()))
-            .unwrap_or_else(|| "sms".to_owned());
-        let response = self
-            .http
-            .put(format!("{IDMSA}/verify/phone"))
-            .headers(self.idmsa_headers(ACCEPT_JSON)?)
-            .json(&json!({"phoneNumber": phone.payload(), "mode": mode}))
-            .send()
-            .await?;
-        self.capture_headers(response.headers());
-        let status = response.status();
-        let body = bounded_response_text(response).await?;
-        self.settle_delivery(status.as_u16(), &body, "sms")?;
+        // The mode carried on the *verification* body. pyicloud takes it from
+        // the phone's own pushMode, falling back to the literal "sms"
+        // (base.py:1226) -- it explicitly does not use `_two_factor_mode()`
+        // there. An earlier version of this preferred the challenge document's
+        // top-level `mode`; that was this connector's invention, so it loses to
+        // the implementation that works.
+        let mode = if phone.push_mode.is_empty() {
+            "sms".to_owned()
+        } else {
+            phone.push_mode.clone()
+        };
+        let (status, body) = self.put_verify_phone(&phone).await?;
+        self.settle_delivery(status, &body, "sms")?;
         self.sent_at = Some(std::time::Instant::now());
         eprintln!("2fa:   {}", self.challenge_summary());
         self.mark_sent(TwoFactorRoute::Sms(phone.id, mode));
@@ -585,6 +583,77 @@ impl AuthClient {
         Ok(())
     }
 
+    /// The four requests pyicloud makes between `signin/complete` answering
+    /// 409 and the user being prompted (base.py:632-541).
+    ///
+    /// Every one of them is fire-and-forget there, and is here too: each exists
+    /// to advance Apple's server-side state, not to return data, and pyicloud
+    /// swallows their failures. The one that matters most is `accountLogin`,
+    /// which spends the limited `X-Apple-Session-Token` Apple hands back with
+    /// the 409. This connector previously returned the 2FA error before
+    /// reaching it, so that token was never spent and the challenge never
+    /// progressed.
+    ///
+    /// The SMS sent here is deliberately *not* recorded as delivered, so the
+    /// caller still requests one. That reproduces pyicloud's two `PUT
+    /// verify/phone` calls, and it matters: the second response is what
+    /// refreshes the `scnt` and `X-Apple-Auth-Attributes` that verification
+    /// then has to carry.
+    async fn prime_two_factor(&mut self) {
+        if let Err(error) = self.load_auth_options().await {
+            eprintln!("2fa: priming: auth options failed ({})", error.code());
+        }
+        if let Err(error) = self.nudge_trusted_device().await {
+            eprintln!("2fa: priming: device nudge failed ({})", error.code());
+        }
+        if let Some(phone) = self.phones.first().cloned() {
+            match self.put_verify_phone(&phone).await {
+                Ok((status, _)) => eprintln!("2fa: priming: first sms request HTTP {status}"),
+                Err(error) => eprintln!("2fa: priming: first sms request failed ({})", error.code()),
+            }
+        }
+        // Expected to report that two-factor is still outstanding. It is sent
+        // for its effect on the session, not its answer.
+        match self.account_login().await {
+            Ok(()) => eprintln!("2fa: priming: accountLogin accepted the limited token"),
+            Err(error) => eprintln!("2fa: priming: accountLogin said {}", error.code()),
+        }
+        eprintln!("2fa: priming: {}", self.challenge_summary());
+    }
+
+    /// pyicloud's `GET verify/trusteddevice` nudge (base.py:841-847). Sent even
+    /// on a phone-only account, and its result is discarded there.
+    async fn nudge_trusted_device(&mut self) -> Result<()> {
+        let response = self
+            .http
+            .get(format!("{IDMSA}/verify/trusteddevice"))
+            .headers(self.idmsa_headers(ACCEPT_JSON)?)
+            .send()
+            .await?;
+        self.capture_headers(response.headers());
+        let status = response.status();
+        let body = bounded_response_text(response).await?;
+        self.note_auth_options(&body);
+        eprintln!("2fa: priming: device nudge HTTP {}", status.as_u16());
+        Ok(())
+    }
+
+    /// `PUT verify/phone`. pyicloud hard-codes `mode: "sms"` on this request
+    /// (base.py:856, base.py:918) rather than deriving it, so this does too.
+    async fn put_verify_phone(&mut self, phone: &TrustedPhone) -> Result<(u16, String)> {
+        let response = self
+            .http
+            .put(format!("{IDMSA}/verify/phone"))
+            .headers(self.idmsa_headers(ACCEPT_JSON)?)
+            .json(&json!({"phoneNumber": phone.payload(), "mode": "sms"}))
+            .send()
+            .await?;
+        self.capture_headers(response.headers());
+        let status = response.status().as_u16();
+        let body = bounded_response_text(response).await?;
+        Ok((status, body))
+    }
+
     /// Fetch the challenge options when the sign-in response did not carry them.
     async fn load_auth_options(&mut self) -> Result<()> {
         // pyicloud asks for text/html here, noting that "requesting JSON tends
@@ -634,28 +703,49 @@ impl AuthClient {
             && !mode.trim().is_empty() {
                 self.challenge_mode = Some(mode.trim().to_owned());
             }
-        // Apple describes the *active* challenge with a singular phone object.
-        // pyicloud reads that in preference to the list, and it is the only
-        // phone record present on a delivery or verification response -- so
-        // without it the id and nonFTEU we echo back come from the sign-in
-        // snapshot rather than from the challenge the code was issued for.
-        if let Some(phone) = value
+        // pyicloud's `_trusted_phone_number` precedence (base.py:974-983),
+        // strictly: the top-level singular record, then the one nested under
+        // phoneNumberVerification, then the *first* of that nested list. It
+        // never reads a top-level `trustedPhoneNumbers` array.
+        //
+        // The previous version here inserted the singular record at the front
+        // and then, if the same document also carried a list, replaced the
+        // whole vector -- discarding the very record it had just prioritised.
+        // The singular now genuinely wins.
+        let singular = value
             .pointer("/trustedPhoneNumber")
+            .or_else(|| value.pointer("/phoneNumberVerification/trustedPhoneNumber"))
             .or_else(|| value.pointer("/phoneNumber"))
-            .and_then(parse_phone)
-        {
-            self.phones.retain(|known| known.id != phone.id);
-            self.phones.insert(0, phone);
+            .and_then(parse_phone);
+        let listed: Vec<TrustedPhone> = value
+            .pointer("/phoneNumberVerification/trustedPhoneNumbers")
+            // Kept only as a fallback: Apple's sign-in 409 uses this top-level
+            // shape, which pyicloud never sees because it discards that body.
+            .or_else(|| value.pointer("/trustedPhoneNumbers"))
+            .and_then(Value::as_array)
+            .map(|entries| entries.iter().filter_map(parse_phone).collect())
+            .unwrap_or_default();
+
+        if singular.is_none() && listed.is_empty() {
+            return;
         }
-        let listed = value
-            .pointer("/trustedPhoneNumbers")
-            .or_else(|| value.pointer("/phoneNumberVerification/trustedPhoneNumbers"))
-            .and_then(Value::as_array);
-        let Some(listed) = listed else { return };
-        let phones: Vec<TrustedPhone> = listed.iter().filter_map(parse_phone).collect();
-        if !phones.is_empty() {
-            self.phones = phones;
+        let mut ordered: Vec<TrustedPhone> = Vec::new();
+        if let Some(phone) = singular {
+            ordered.push(phone);
         }
+        for phone in listed {
+            if !ordered.iter().any(|known| known.id == phone.id) {
+                ordered.push(phone);
+            }
+        }
+        // Anything Apple still lists but did not repeat stays reachable, behind
+        // whatever this document named.
+        for phone in std::mem::take(&mut self.phones) {
+            if !ordered.iter().any(|known| known.id == phone.id) {
+                ordered.push(phone);
+            }
+        }
+        self.phones = ordered;
     }
 
     pub async fn submit_2fa(&mut self, code: &str) -> Result<()> {
@@ -2027,6 +2117,47 @@ mod challenge_state_tests {
         assert_eq!(auth.phones[0].id, 7, "the active challenge phone comes first");
         assert_eq!(auth.phones[0].non_fteu, Some(true));
         assert_eq!(auth.phones[0].payload()["nonFTEU"], serde_json::json!(true));
+    }
+
+    /// The case the previous test never covered: a document carrying BOTH a
+    /// singular record and a list. The old code inserted the singular at the
+    /// front and then let the list replace the whole vector, so the record it
+    /// had just prioritised was the one it threw away.
+    #[test]
+    fn the_singular_record_wins_over_a_list_in_the_same_document() {
+        let mut auth = AuthClient::new(None).expect("client");
+        auth.note_auth_options(
+            r#"{"trustedPhoneNumber":{"id":7,"pushMode":"sms","nonFTEU":true},
+                "trustedPhoneNumbers":[{"id":3,"pushMode":"sms"},{"id":9,"pushMode":"voice"}]}"#,
+        );
+        assert_eq!(auth.phones[0].id, 7, "singular must lead: {:?}", auth.phones);
+        assert_eq!(auth.phones[0].non_fteu, Some(true));
+        // The listed alternatives stay reachable behind it.
+        assert!(auth.phones.iter().any(|p| p.id == 3));
+        assert!(auth.phones.iter().any(|p| p.id == 9));
+    }
+
+    /// pyicloud reads the phone nested under phoneNumberVerification before it
+    /// looks at any list (base.py:974-983).
+    #[test]
+    fn a_nested_singular_record_outranks_the_nested_list() {
+        let mut auth = AuthClient::new(None).expect("client");
+        auth.note_auth_options(
+            r#"{"phoneNumberVerification":{
+                  "trustedPhoneNumber":{"id":42,"pushMode":"sms"},
+                  "trustedPhoneNumbers":[{"id":1,"pushMode":"sms"}]}}"#,
+        );
+        assert_eq!(auth.phones[0].id, 42, "{:?}", auth.phones);
+    }
+
+    /// A document that names no phone at all must not wipe what is known.
+    #[test]
+    fn a_document_without_phones_leaves_the_known_set_alone() {
+        let mut auth = AuthClient::new(None).expect("client");
+        auth.note_auth_options(r#"{"trustedPhoneNumbers":[{"id":5,"pushMode":"sms"}]}"#);
+        auth.note_auth_options(r#"{"mode":"sms","hsa2Account":true}"#);
+        assert_eq!(auth.phones.len(), 1);
+        assert_eq!(auth.phones[0].id, 5);
     }
 
     #[test]
