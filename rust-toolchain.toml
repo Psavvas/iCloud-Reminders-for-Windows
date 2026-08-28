@@ -1,0 +1,5 @@
+[toolchain]
+# Current stable release when this native connector was written. Dependabot or
+# a deliberate maintenance change should advance this after Windows CI passes.
+channel = "1.97.1"
+profile = "minimal"

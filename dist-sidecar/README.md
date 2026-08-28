@@ -1,7 +1,16 @@
 # Sidecar build output
 
-`scripts/build-sidecar.ps1` writes `reminders-sidecar.exe` here with PyInstaller,
-and `tauri build` bundles everything in this directory next to the app exe.
+`scripts/build-sidecar.ps1` writes the native Rust `reminders-sidecar.exe` here,
+and the WinUI publish step copies it next to `Reminders.exe`.
 
-The directory is committed with this file so the bundler's resource glob matches
+The directory is committed with this file so the project content item resolves
 on a fresh checkout, before the sidecar has been built.
+
+Build it from the repository root with:
+
+```powershell
+.\scripts\build-sidecar.ps1
+```
+
+Node.js and npm are not involved. For complete application and demo commands,
+see [the Windows getting-started guide](../docs/getting-started.md).

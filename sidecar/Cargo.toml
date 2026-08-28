@@ -1,0 +1,44 @@
+[package]
+name = "reminders-sidecar"
+# Keep in step with src-windows/Reminders.WinUI/Reminders.WinUI.csproj <Version>.
+# CI enforces this (see .github/workflows/build.yml, "Check versions agree").
+version = "0.3.0"
+description = "Native iCloud Reminders connector for the Windows desktop app"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Paul Savvas"]
+homepage = "https://paulsavvas.com"
+repository = "https://github.com/Psavvas/iCloud-Reminders-for-Windows"
+publish = false
+
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
+num-bigint = "0.4"
+pbkdf2 = "0.12"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "cookies"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+srp = "0.6"
+thiserror = "2"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
