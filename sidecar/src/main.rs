@@ -91,6 +91,14 @@ async fn run() -> error::Result<()> {
             let _ = stdout.flush().await;
         }
     });
+    // Stamp the build into the log. Without this there is no way to tell from
+    // a log which binary produced it, which has already cost several rounds of
+    // live debugging.
+    eprintln!(
+        "reminders-sidecar {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("REMINDERS_BUILD_REVISION")
+    );
     let server = Server::open(&data_dir, apple_id, tx.clone())?;
     server.start().await;
     serve(tokio::io::stdin(), server, tx).await?;

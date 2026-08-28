@@ -165,6 +165,9 @@ pub struct AuthClient {
     /// `_two_factor_mode` prefers this over the phone's `pushMode`, and Apple
     /// restates it on every challenge document it returns.
     challenge_mode: Option<String>,
+    /// When the outstanding code was sent, so the log can show its age. Codes
+    /// expire, and an expired one is refused exactly like a wrong one.
+    sent_at: Option<std::time::Instant>,
     scnt_generation: u32,
     session_generation: u32,
 }
@@ -194,6 +197,7 @@ impl AuthClient {
             notice: None,
             options_loaded: false,
             challenge_mode: None,
+            sent_at: None,
             scnt_generation: 0,
             session_generation: 0,
         })
@@ -520,6 +524,8 @@ impl AuthClient {
         let status = response.status();
         let body = bounded_response_text(response).await?;
         self.settle_delivery(status.as_u16(), &body, "sms")?;
+        self.sent_at = Some(std::time::Instant::now());
+        eprintln!("2fa:   {}", self.challenge_summary());
         self.mark_sent(TwoFactorRoute::Sms(phone.id, mode));
         Ok(json!({
             "sent": true,
@@ -676,10 +682,18 @@ impl AuthClient {
                 stamp_at_send,
                 self.session_stamp()
             );
-            eprintln!("2fa:   {}", body_shape(&text));
+            eprintln!(
+                "2fa:   {} | code age {}",
+                body_shape(&text),
+                self.sent_at
+                    .map(|at| format!("{}s", at.elapsed().as_secs()))
+                    .unwrap_or_else(|| "unknown".to_owned())
+            );
+            eprintln!("2fa:   before: {}", self.challenge_summary());
             // A refusal that restates the challenge is Apple telling us which
             // one is current. Adopt it before trying the next route.
             self.note_auth_options(&text);
+            eprintln!("2fa:   after:  {}", self.challenge_summary());
             if Self::is_wrong_verifier(route, status.as_u16()) {
                 // Not the user's typing, and not a code that can be re-sent.
                 // Say so plainly and point at the route that does work.
@@ -888,6 +902,27 @@ impl AuthClient {
         }
         if self.state.scnt != previous_scnt {
             self.scnt_generation = self.scnt_generation.saturating_add(1);
+        }
+    }
+
+    /// What this connector believes the outstanding challenge is, and would
+    /// therefore echo back. All non-sensitive: a mode string, a small integer
+    /// id and two booleans. The masked number is Apple's own rendering and is
+    /// already shown in the UI.
+    fn challenge_summary(&self) -> String {
+        match self.phones.first() {
+            Some(phone) => format!(
+                "challenge: mode={} phone.id={} phone.pushMode={} nonFTEU={:?} masked={}",
+                self.challenge_mode.as_deref().unwrap_or("<none>"),
+                phone.id,
+                phone.push_mode,
+                phone.non_fteu,
+                phone.masked
+            ),
+            None => format!(
+                "challenge: mode={} phone=<none known>",
+                self.challenge_mode.as_deref().unwrap_or("<none>")
+            ),
         }
     }
 
