@@ -161,6 +161,10 @@ pub struct AuthClient {
     /// How many times Apple has rotated `scnt` / `x-apple-id-session-id`.
     /// Values are session credentials and must never be logged; a counter says
     /// whether a request rotated them, which is what diagnosis needs.
+    /// The delivery mode Apple names on the challenge itself. pyicloud's
+    /// `_two_factor_mode` prefers this over the phone's `pushMode`, and Apple
+    /// restates it on every challenge document it returns.
+    challenge_mode: Option<String>,
     scnt_generation: u32,
     session_generation: u32,
 }
@@ -189,6 +193,7 @@ impl AuthClient {
             sent_on: Vec::new(),
             notice: None,
             options_loaded: false,
+            challenge_mode: None,
             scnt_generation: 0,
             session_generation: 0,
         })
@@ -495,11 +500,15 @@ impl AuthClient {
                     .into(),
                 detail: String::new(),
             })?;
-        let mode = if phone.push_mode.is_empty() {
-            "sms".to_owned()
-        } else {
-            phone.push_mode.clone()
-        };
+        // pyicloud's precedence: the mode Apple names on the challenge wins
+        // over the phone's own pushMode. The route stores whichever is used so
+        // verification echoes exactly what delivery was asked for.
+        let mode = self
+            .challenge_mode
+            .clone()
+            .filter(|mode| !mode.trim().is_empty())
+            .or_else(|| Some(phone.push_mode.clone()).filter(|m| !m.is_empty()))
+            .unwrap_or_else(|| "sms".to_owned());
         let response = self
             .http
             .put(format!("{IDMSA}/verify/phone"))
@@ -537,6 +546,9 @@ impl AuthClient {
     /// your other devices" is better copy than anything invented here.
     fn settle_delivery(&mut self, status: u16, body: &str, route: &str) -> Result<()> {
         self.notice = apple_message(body);
+        // The response restates the challenge; adopt it so what we send next
+        // describes the challenge Apple just issued the code for.
+        self.note_auth_options(body);
         // Logged so this is diagnosable from the app log rather than guessed at:
         // Apple's exact status for these endpoints is not documented anywhere.
         eprintln!(
@@ -583,32 +595,29 @@ impl AuthClient {
         {
             self.trusted_device_count = count;
         }
+        if let Some(mode) = value.pointer("/mode").and_then(Value::as_str)
+            && !mode.trim().is_empty() {
+                self.challenge_mode = Some(mode.trim().to_owned());
+            }
+        // Apple describes the *active* challenge with a singular phone object.
+        // pyicloud reads that in preference to the list, and it is the only
+        // phone record present on a delivery or verification response -- so
+        // without it the id and nonFTEU we echo back come from the sign-in
+        // snapshot rather than from the challenge the code was issued for.
+        if let Some(phone) = value
+            .pointer("/trustedPhoneNumber")
+            .or_else(|| value.pointer("/phoneNumber"))
+            .and_then(parse_phone)
+        {
+            self.phones.retain(|known| known.id != phone.id);
+            self.phones.insert(0, phone);
+        }
         let listed = value
             .pointer("/trustedPhoneNumbers")
             .or_else(|| value.pointer("/phoneNumberVerification/trustedPhoneNumbers"))
             .and_then(Value::as_array);
         let Some(listed) = listed else { return };
-        let phones: Vec<TrustedPhone> = listed
-            .iter()
-            .filter_map(|entry| {
-                Some(TrustedPhone {
-                    id: entry.get("id").and_then(Value::as_i64)?,
-                    push_mode: entry
-                        .get("pushMode")
-                        .and_then(Value::as_str)
-                        .unwrap_or("sms")
-                        .to_owned(),
-                    non_fteu: entry.get("nonFTEU").and_then(Value::as_bool),
-                    // Apple's own masked rendering. Never store the real number.
-                    masked: entry
-                        .get("numberWithDialCode")
-                        .or_else(|| entry.get("obfuscatedNumber"))
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                })
-            })
-            .collect();
+        let phones: Vec<TrustedPhone> = listed.iter().filter_map(parse_phone).collect();
         if !phones.is_empty() {
             self.phones = phones;
         }
@@ -668,6 +677,9 @@ impl AuthClient {
                 self.session_stamp()
             );
             eprintln!("2fa:   {}", body_shape(&text));
+            // A refusal that restates the challenge is Apple telling us which
+            // one is current. Adopt it before trying the next route.
+            self.note_auth_options(&text);
             if Self::is_wrong_verifier(route, status.as_u16()) {
                 // Not the user's typing, and not a code that can be re-sent.
                 // Say so plainly and point at the route that does work.
@@ -1169,6 +1181,28 @@ fn body_shape(body: &str) -> String {
         return format!("{shape} | raw: {}", body.chars().take(600).collect::<String>());
     }
     shape
+}
+
+/// One trusted-phone record, from either the list Apple sends at sign-in or the
+/// singular object it uses to describe the active challenge. Both shapes carry
+/// the same fields, and the id plus `nonFTEU` are what get echoed back.
+fn parse_phone(entry: &Value) -> Option<TrustedPhone> {
+    Some(TrustedPhone {
+        id: entry.get("id").and_then(Value::as_i64)?,
+        push_mode: entry
+            .get("pushMode")
+            .and_then(Value::as_str)
+            .unwrap_or("sms")
+            .to_owned(),
+        non_fteu: entry.get("nonFTEU").and_then(Value::as_bool),
+        // Apple's own masked rendering. Never store the real number.
+        masked: entry
+            .get("numberWithDialCode")
+            .or_else(|| entry.get("obfuscatedNumber"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+    })
 }
 
 /// Apple's numeric service-error code, when it gave one. Diagnostic only --
@@ -1900,5 +1934,52 @@ mod body_shape_tests {
         let shape = body_shape("<html>Access Denied</html>");
         assert!(shape.contains("not JSON"), "{shape}");
         assert!(!shape.contains("Access Denied"), "{shape}");
+    }
+}
+
+#[cfg(test)]
+mod challenge_state_tests {
+    use super::{AuthClient, TwoFactorRoute};
+
+    /// Apple's delivery and refusal responses both restate the challenge with a
+    /// top-level `mode` and a singular `phoneNumber`. That singular record --
+    /// not the sign-in list -- describes the challenge the code was issued for,
+    /// so it has to be what gets echoed back.
+    #[test]
+    fn a_challenge_document_overrides_the_sign_in_snapshot() {
+        let mut auth = AuthClient::new(None).expect("client");
+        auth.note_auth_options(
+            r#"{"trustedPhoneNumbers":[{"id":1,"pushMode":"sms","numberWithDialCode":"+1 ***1"}]}"#,
+        );
+        assert_eq!(auth.phones[0].id, 1);
+        assert_eq!(auth.challenge_mode, None);
+
+        // The delivery response names a different number and an explicit mode.
+        auth.note_auth_options(
+            r#"{"mode":"voice","phoneNumber":{"id":7,"pushMode":"sms","nonFTEU":true,
+                "numberWithDialCode":"+1 ***7"}}"#,
+        );
+        assert_eq!(auth.challenge_mode.as_deref(), Some("voice"));
+        assert_eq!(auth.phones[0].id, 7, "the active challenge phone comes first");
+        assert_eq!(auth.phones[0].non_fteu, Some(true));
+        assert_eq!(auth.phones[0].payload()["nonFTEU"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn the_challenge_phone_replaces_rather_than_duplicates_a_known_one() {
+        let mut auth = AuthClient::new(None).expect("client");
+        auth.note_auth_options(r#"{"trustedPhoneNumbers":[{"id":7,"pushMode":"sms"}]}"#);
+        auth.note_auth_options(r#"{"phoneNumber":{"id":7,"pushMode":"sms","nonFTEU":false}}"#);
+        assert_eq!(auth.phones.len(), 1, "same id must not appear twice");
+        assert_eq!(auth.phones[0].non_fteu, Some(false));
+    }
+
+    /// The route records the mode delivery actually used, so verification
+    /// cannot echo a different one than the code was sent under.
+    #[test]
+    fn the_route_carries_the_mode_delivery_used() {
+        let route = TwoFactorRoute::Sms(7, "voice".into());
+        assert_eq!(route, TwoFactorRoute::Sms(7, "voice".into()));
+        assert_ne!(route, TwoFactorRoute::Sms(7, "sms".into()));
     }
 }
