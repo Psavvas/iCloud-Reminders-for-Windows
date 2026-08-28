@@ -457,7 +457,12 @@ impl AuthClient {
     pub async fn request_2fa(&mut self) -> Result<Value> {
         // A text is preferred whenever Apple has a number for it -- see
         // `post_code` for why the trusted-device prompt is a dead end here.
-        if self.phones.is_empty() && !self.options_loaded {
+        // Fetch the challenge once per sign-in, whether or not the sign-in
+        // response happened to list a phone. pyicloud fetches it the moment
+        // two-factor is required and before requesting any code; skipping it
+        // when phones were already known meant Apple never saw the request
+        // that picks the challenge up.
+        if !self.options_loaded {
             self.load_auth_options().await?;
         }
         if !self.phones.is_empty() {
@@ -491,7 +496,12 @@ impl AuthClient {
     /// second one when they tried again, and -- because the route decides which
     /// endpoint verifies the code -- a rejection for every code they then typed.
     pub async fn request_sms_code(&mut self) -> Result<Value> {
-        if self.phones.is_empty() && !self.options_loaded {
+        // Fetch the challenge once per sign-in, whether or not the sign-in
+        // response happened to list a phone. pyicloud fetches it the moment
+        // two-factor is required and before requesting any code; skipping it
+        // when phones were already known meant Apple never saw the request
+        // that picks the challenge up.
+        if !self.options_loaded {
             self.load_auth_options().await?;
         }
         let phone = self
@@ -577,16 +587,35 @@ impl AuthClient {
 
     /// Fetch the challenge options when the sign-in response did not carry them.
     async fn load_auth_options(&mut self) -> Result<()> {
+        // pyicloud asks for text/html here, noting that "requesting JSON tends
+        // to collapse the response to the SMS-oriented shape". Apple sees the
+        // same request either way; what differs is what comes back, so try the
+        // richer form first and fall back to JSON when it is not parseable.
         let response = self
             .http
             .get(IDMSA)
-            .headers(self.idmsa_headers(ACCEPT_JSON)?)
+            .headers(self.idmsa_headers("text/html")?)
             .send()
             .await?;
         self.capture_headers(response.headers());
         let body = bounded_response_text(response).await?;
         self.options_loaded = true;
+        if serde_json::from_str::<Value>(&body).is_ok() {
+            self.note_auth_options(&body);
+            eprintln!("2fa:   options (html) {}", self.challenge_summary());
+            return Ok(());
+        }
+
+        let fallback = self
+            .http
+            .get(IDMSA)
+            .headers(self.idmsa_headers(ACCEPT_JSON)?)
+            .send()
+            .await?;
+        self.capture_headers(fallback.headers());
+        let body = bounded_response_text(fallback).await?;
         self.note_auth_options(&body);
+        eprintln!("2fa:   options (json) {}", self.challenge_summary());
         Ok(())
     }
 
