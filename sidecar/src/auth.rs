@@ -168,6 +168,12 @@ pub struct AuthClient {
     /// When the outstanding code was sent, so the log can show its age. Codes
     /// expire, and an expired one is refused exactly like a wrong one.
     sent_at: Option<std::time::Instant>,
+    /// Apple pushed a prompt to the trusted devices. Tracked apart from
+    /// `sent_on` because that drives the "a code is waiting for you" flag in
+    /// the UI, and a device push must not stop the app from also requesting the
+    /// text the user is actually being asked for. It only means the device
+    /// verifier is worth trying a code against.
+    device_pushed: bool,
     scnt_generation: u32,
     session_generation: u32,
 }
@@ -198,6 +204,7 @@ impl AuthClient {
             options_loaded: false,
             challenge_mode: None,
             sent_at: None,
+            device_pushed: false,
             scnt_generation: 0,
             session_generation: 0,
         })
@@ -339,6 +346,7 @@ impl AuthClient {
                 self.sent_on.clear();
                 self.notice = None;
                 self.options_loaded = false;
+                self.device_pushed = false;
                 self.note_auth_options(&body);
                 // Fix the route now, so a code is verified against the right
                 // endpoint even if nothing else gets a say. Deliberately *not*
@@ -634,6 +642,10 @@ impl AuthClient {
         let status = response.status();
         let body = bounded_response_text(response).await?;
         self.note_auth_options(&body);
+        // Apple shows the prompt on a 2xx and, on some accounts, on a 4xx too;
+        // either way a code is now on the user's devices and the device
+        // verifier is worth trying against.
+        self.device_pushed = true;
         eprintln!("2fa: priming: device nudge HTTP {}", status.as_u16());
         Ok(())
     }
@@ -772,6 +784,17 @@ impl AuthClient {
                 routes.push(route);
             }
         }
+        // A device prompt raised during priming is a second live challenge with
+        // its own code. Whichever of the two the user typed, one of these
+        // endpoints is the one that can accept it.
+        if self.device_pushed && !routes.contains(&TwoFactorRoute::TrustedDevice) {
+            routes.push(TwoFactorRoute::TrustedDevice);
+        }
+        eprintln!(
+            "2fa: verifying against {} route(s): {}",
+            routes.len(),
+            routes.iter().map(TwoFactorRoute::name).collect::<Vec<_>>().join(", ")
+        );
 
         for (index, route) in routes.iter().enumerate() {
             let stamp_at_send = self.session_stamp();
@@ -830,10 +853,12 @@ impl AuthClient {
                     detail: safe_detail(&text),
                 });
             }
-            // Apple naming the digits as wrong is definitive -- no other route
-            // would have taken them either -- and the last route is the last
-            // chance regardless.
-            if is_wrong_code(&text) || index + 1 == routes.len() {
+            // "Wrong digits" is only definitive for the challenge that was
+            // asked. With a device prompt and a text both outstanding, the
+            // code the user typed belongs to exactly one of them, and the
+            // other endpoint calling it wrong proves nothing. Only the last
+            // route's verdict is reported.
+            if index + 1 == routes.len() {
                 return Err(classify_code_rejection(status.as_u16(), &text));
             }
         }
@@ -2123,6 +2148,23 @@ mod challenge_state_tests {
     /// singular record and a list. The old code inserted the singular at the
     /// front and then let the list replace the whole vector, so the record it
     /// had just prioritised was the one it threw away.
+    /// A device push and a text can both be outstanding. The code the user
+    /// types belongs to one of them, so both endpoints have to be tried, and a
+    /// device push must not suppress the text the UI still needs to request.
+    #[test]
+    fn a_device_push_adds_a_route_without_claiming_a_code_was_sent() {
+        let mut auth = AuthClient::new(None).expect("client");
+        auth.device_pushed = true;
+        assert_eq!(
+            auth.two_factor_status()["sent"],
+            serde_json::json!(false),
+            "a device push must not make the app skip requesting the text"
+        );
+
+        auth.mark_sent(TwoFactorRoute::Sms(7, "sms".into()));
+        assert_eq!(auth.two_factor_status()["sent"], serde_json::json!(true));
+    }
+
     #[test]
     fn the_singular_record_wins_over_a_list_in_the_same_document() {
         let mut auth = AuthClient::new(None).expect("client");
