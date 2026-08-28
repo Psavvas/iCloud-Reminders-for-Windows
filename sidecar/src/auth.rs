@@ -179,12 +179,12 @@ pub struct AuthClient {
 }
 
 impl AuthClient {
-    pub fn new(state: Option<SessionState>) -> Result<Self> {
-        let mut state = state.unwrap_or_default();
-        if state.client_id.is_empty() {
-            state.client_id = Uuid::new_v4().to_string().to_lowercase();
-        }
-        let http = reqwest::Client::builder()
+    /// A client with an empty cookie jar. Apple's auth cookies (`aasp` above
+    /// all) live only here -- they are never persisted -- so a jar and the
+    /// session headers that were issued alongside it have to be created and
+    /// discarded together.
+    fn build_http() -> Result<reqwest::Client> {
+        Ok(reqwest::Client::builder()
             .https_only(true)
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -192,7 +192,15 @@ impl AuthClient {
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(60))
             .user_agent(USER_AGENT_VALUE)
-            .build()?;
+            .build()?)
+    }
+
+    pub fn new(state: Option<SessionState>) -> Result<Self> {
+        let mut state = state.unwrap_or_default();
+        if state.client_id.is_empty() {
+            state.client_id = Uuid::new_v4().to_string().to_lowercase();
+        }
+        let http = Self::build_http()?;
         Ok(Self {
             http,
             state,
@@ -263,6 +271,27 @@ impl AuthClient {
         password: &str,
         accept_terms: bool,
     ) -> Result<Value> {
+        // Start the handshake from a clean slate.
+        //
+        // pyicloud persists its cookie jar next to its session data and
+        // restores the two together, so the `scnt` / session id it replays
+        // always arrive with the `aasp` cookie Apple issued alongside them.
+        // This connector persists the session data only -- `SessionState` has
+        // no cookie field -- so a restored session id was being replayed with
+        // an empty jar, a pairing Apple has no reason to honour. Discarding
+        // both restores the consistency pyicloud gets by keeping both.
+        //
+        // Nothing durable is lost: `restore` re-runs the full handshake
+        // regardless, and the tokens that survive a restart -- the session and
+        // trust tokens -- are deliberately left in place below.
+        self.http = Self::build_http()?;
+        self.state.session_id = None;
+        self.state.scnt = None;
+        self.state.auth_attributes = None;
+        self.scnt_generation = 0;
+        self.session_generation = 0;
+        eprintln!("auth: starting a fresh handshake (new cookie jar, cleared session headers)");
+
         // iCloud's web login first establishes the browser-auth context and
         // cookies used by the two SRP requests. The Python implementation this
         // connector replaced performs the same bootstrap.
@@ -2151,6 +2180,40 @@ mod challenge_state_tests {
     /// A device push and a text can both be outstanding. The code the user
     /// types belongs to one of them, so both endpoints have to be tried, and a
     /// device push must not suppress the text the UI still needs to request.
+    /// The tokens that are meant to outlive a restart must survive the reset;
+    /// the per-challenge headers, which have no persisted cookies to match,
+    /// must not.
+    #[test]
+    fn a_fresh_handshake_keeps_durable_tokens_and_drops_challenge_headers() {
+        let state = super::SessionState {
+            session_id: Some("stale-session".into()),
+            scnt: Some("stale-scnt".into()),
+            auth_attributes: Some("stale-attrs".into()),
+            session_token: Some("durable-session-token".into()),
+            trust_token: Some("durable-trust-token".into()),
+            account_country: Some("USA".into()),
+            client_id: "fixed-client-id".into(),
+            ..super::SessionState::default()
+        };
+        let mut auth = AuthClient::new(Some(state)).expect("client");
+
+        // What `sign_in` clears before the bootstrap request.
+        auth.state.session_id = None;
+        auth.state.scnt = None;
+        auth.state.auth_attributes = None;
+
+        assert_eq!(auth.state.session_token.as_deref(), Some("durable-session-token"));
+        assert_eq!(auth.state.trust_token.as_deref(), Some("durable-trust-token"));
+        assert_eq!(auth.state.account_country.as_deref(), Some("USA"));
+        assert_eq!(auth.state.client_id, "fixed-client-id", "client id is stable");
+
+        // And none of the cleared ones reach Apple's auth server.
+        let headers = auth.idmsa_headers(super::ACCEPT_JSON).expect("headers");
+        assert!(!headers.contains_key("x-apple-id-session-id"));
+        assert!(!headers.contains_key("scnt"));
+        assert!(!headers.contains_key("x-apple-auth-attributes"));
+    }
+
     #[test]
     fn a_device_push_adds_a_route_without_claiming_a_code_was_sent() {
         let mut auth = AuthClient::new(None).expect("client");
