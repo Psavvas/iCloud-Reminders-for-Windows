@@ -29,15 +29,34 @@ Results print as a table and are written to `spike/results.md`.
 
 ## What it does to your account
 
-Everything it creates is prefixed `ZZSPIKE` and deleted in the cleanup phase:
+Everything it creates is prefixed `ZZSPIKE`:
 
 - 3 reminders (create test, tag test, delta test)
 - 1 hashtag (`spiketag`)
 - 1 list (`ZZSPIKE new list`) — **only if item 6's raw create is accepted**
 
-If the run crashes midway, search Reminders for `ZZSPIKE` and delete leftovers by
-hand. Note that reminder deletion in this API is a *soft* delete (`Deleted=1`),
-which is why cleanup checks list membership rather than trusting a 404.
+`run_spike.py` cleans up after itself. The two follow-up scripts do not, and
+this is worth stating plainly because it has already bitten:
+
+- `probe_schema.py` creates a `spikeprobe` hashtag and asks you to add
+  `#phonetag` by hand on the iPhone; `probe_fixes.py` creates `stringtag`.
+- Both then delete only the *reminder* the tags hang off, and deletion here is a
+  *soft* delete — the reminder record stays in the zone with `Deleted=1`, still
+  listing those hashtags in `HashtagIDs`.
+
+So the Hashtag records survive, referenced only by a reminder Apple's own app
+will not show you. That is what makes such a tag look stuck in Reminders:
+**Delete Tag** has no visible reminder to rewrite so it appears to do nothing,
+and **Rename Tag** writes a new Hashtag record and leaves the old one in place.
+
+`find_stray_tags.py` reports these and, with `--delete`, removes them —
+unlinking the tag from the soft-deleted reminder first, since that reference is
+what keeps it alive. `find_stray_lists.py` and `force_delete_list.py` do the
+equivalent for the `List` record item 6 left behind.
+
+If a run crashes midway, search Reminders for `ZZSPIKE` and delete leftovers by
+hand. Note that the soft delete is also why cleanup checks list membership
+rather than trusting a 404.
 
 ## Why you have to run this
 
