@@ -140,6 +140,30 @@ def test_full_sync_populates_cache_and_skips_groups(rig):
     assert ("sync_finished", {"mode": "full", "reminders": 2}) in events
 
 
+def test_full_sync_clears_a_tag_that_was_removed_on_the_phone(rig):
+    """
+    A reminder that loses its last tag vanishes from the server's tag map rather
+    than appearing in it empty, so a sweep that writes only what the map holds
+    leaves the old rows behind. That makes a removed tag look permanent in the
+    sidebar, and survives the one remedy a user would try -- Re-download
+    everything, which runs exactly this pass.
+    """
+    cache, client, engine, _events = rig
+    client.reminders_data["List/A"] = [
+        {"id": "Reminder/1", "list_id": "List/A", "title": "a", "change_tag": "t"}
+    ]
+    client.tags_data["List/A"] = {
+        "Reminder/1": [{"id": "Hashtag/1", "name": "phonetag"}]
+    }
+    engine.full_sync()
+    assert [t["name"] for t in cache.all_tags()] == ["phonetag"]
+
+    client.tags_data["List/A"] = {}
+    engine.full_sync()
+    assert cache.all_tags() == []
+    assert cache.reminder("Reminder/1")["tags"] == []
+
+
 def test_full_sync_reports_progress(rig):
     _cache, client, engine, events = rig
     client.reminders_data["List/A"] = [

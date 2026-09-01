@@ -96,8 +96,15 @@ class SyncEngine:
                 for i, l in enumerate(work):
                     reminders, tags_by = self.client.reminders_for(l["id"])
                     self.cache.upsert_reminders(reminders)
-                    for rid, tags in tags_by.items():
-                        self.cache.replace_tags_for(rid, tags)
+                    # Every reminder in the batch, not only the ones the server
+                    # returned tags for. A reminder that lost its last tag is
+                    # simply absent from tags_by, so writing only what that map
+                    # contains would leave the old rows standing -- and this is
+                    # the pass behind "Re-download everything", the one thing a
+                    # user reaches for when a tag will not go away.
+                    self.cache.replace_tags_for_reminders(
+                        [r["id"] for r in reminders], tags_by
+                    )
                     total += len(reminders)
                     spent += weights[i]
                     self.emit(

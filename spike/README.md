@@ -39,6 +39,37 @@ If the run crashes midway, search Reminders for `ZZSPIKE` and delete leftovers b
 hand. Note that reminder deletion in this API is a *soft* delete (`Deleted=1`),
 which is why cleanup checks list membership rather than trusting a 404.
 
+### Leftovers you cannot delete by hand
+
+Two kinds outlive cleanup, and neither can be cleared from an Apple device.
+
+**Lists.** `ZZSPIKE new list` survived item 6 and shows on Windows only —
+`find_stray_lists.py` reports it, `force_delete_list.py` escalates past the soft
+delete that Apple accepts and ignores.
+
+**Tags.** `probe_schema.py` and `probe_fixes.py` delete the *reminder* they
+attached a hashtag to and never the `Hashtag` record itself. Since that delete
+is soft, the record stays, still pointing at a reminder no Apple client will
+show — including `#phonetag`, which `probe_schema.py` asks you to type by hand on
+the phone.
+
+A tag in that state cannot be deleted in Reminders. Delete appears to do
+nothing, and rename yields a second tag under the new name with the original
+still there — a rename being a create plus a delete, so a delete that cannot
+land shows up twice. Deleting a tag means stripping it from the reminders that
+carry it, and there is no reachable reminder left to strip.
+
+`find_stray_tags.py` reports every `Hashtag` record with the state of the
+reminder it points at, and removes the named one:
+
+```powershell
+python spike\find_stray_tags.py --apple-id you@example.com
+python spike\find_stray_tags.py --apple-id you@example.com --name "phone tag" --go
+```
+
+It leaves tags on live reminders alone unless you pass `--include-live`, and
+`--go` requires `--name` so a mistyped flag cannot strip the account.
+
 ## Why you have to run this
 
 I could not execute these checks myself:

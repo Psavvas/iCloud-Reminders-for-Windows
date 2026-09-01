@@ -503,6 +503,44 @@ class Cache:
             )
             self._conn.commit()
 
+    def replace_tags_for_reminders(
+        self, reminder_ids: Iterable[str], tags_by: dict[str, list[dict]]
+    ) -> None:
+        """
+        Rewrite the tag rows for a whole batch of reminders at once.
+
+        replace_tags_for can only clear reminders it is handed, and the server's
+        tag map holds nothing at all for a reminder whose last tag was removed
+        on the phone -- so a sweep driven by that map alone never hears about
+        the removal, and the stale row outlives even a full re-download. Every
+        reminder in the batch is cleared first, which is what makes this a
+        rebuild rather than an overlay.
+
+        One transaction, not one per reminder: the accounts this runs against
+        hold thousands of reminders and almost none of them carry a tag.
+        """
+        ids = list(dict.fromkeys([*reminder_ids, *tags_by.keys()]))
+        if not ids:
+            return
+        with self._lock:
+            # SQLite caps host parameters per statement; chunk rather than
+            # assume a list is small enough.
+            for i in range(0, len(ids), 400):
+                chunk = ids[i : i + 400]
+                marks = ",".join("?" * len(chunk))
+                self._conn.execute(
+                    f"DELETE FROM tags WHERE reminder_id IN ({marks})", chunk
+                )
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO tags(id,name,reminder_id) VALUES(?,?,?)",
+                [
+                    (t["id"], t["name"], rid)
+                    for rid in ids
+                    for t in (tags_by.get(rid) or [])
+                ],
+            )
+            self._conn.commit()
+
     def smart_counts(self, now: Optional[datetime] = None) -> dict:
         """Badge counts for the smart lists, in one pass each."""
         _start, end = self._day_bounds(now)

@@ -411,7 +411,7 @@ pip install ./sidecar pytest
 cd sidecar; python -m pytest
 ```
 
-161 tests, aimed at the things that are hard to check by looking:
+162 tests, aimed at the things that are hard to check by looking:
 
 - wall-clock and timezone conversion, including the all-day case
 - cache filtering, ordering and the Completed cap
