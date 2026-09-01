@@ -11,7 +11,9 @@ py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r spike\requirements.txt
 
-# Seeds the keyring + does the interactive 2FA dance once.
+# Seeds the keyring + does the interactive 2FA dance once. Optional: every
+# script here prompts for the password and handles 2FA on its own if the
+# keyring has nothing.
 icloud auth login --username you@example.com
 
 python spike\run_spike.py --apple-id you@example.com

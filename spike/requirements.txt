@@ -1,5 +1,11 @@
 # Phase 1 spike only. Not the app's dependency set.
-pyicloud>=2.6.5
+#
+# [cli] because the very next step in the README is `icloud auth login`, and the
+# console script is a no-op without it: click, typer and rich are optional
+# extras, so a plain install leaves `icloud` printing "CLI dependencies are not
+# installed" and the keyring never gets seeded. The app itself never shells out
+# to the CLI, which is why sidecar/pyproject.toml stays on the bare package.
+pyicloud[cli]>=2.6.5
 
 # keyring backend for Windows Credential Manager (pulled in by pyicloud, pinned
 # here so the session-persistence check has somewhere to persist to)
