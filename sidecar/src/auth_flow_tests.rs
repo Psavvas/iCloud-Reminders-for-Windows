@@ -27,6 +27,9 @@ fn mock(replies: Vec<Reply>) -> (AuthClient, JoinHandle<Vec<String>>) {
                     Err(error) => panic!("{error}"),
                 }
             };
+            // Windows can inherit the listener's nonblocking mode on accept.
+            // Request reads must wait for bytes, bounded by the read timeout.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
