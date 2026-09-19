@@ -29,6 +29,7 @@ public sealed partial class MainWindow : Window
     private ReminderItem? _selected;
     private NavEntry _view = new("Today", "", NavKind.Smart, "today");
     private string _sort = "manual";
+    private bool _verificationBusy;
     private bool _loadingDetail;
     private bool _demo;
     private int _minutesSinceSync;
@@ -267,13 +268,26 @@ public sealed partial class MainWindow : Window
         }
         else ShowLogin();
     }
+    private void SetVerificationControlsEnabled(bool enabled)
+    {
+        CodeBox.IsEnabled = enabled;
+        VerifyCode.IsEnabled = enabled;
+        ResendCode.IsEnabled = enabled;
+        TextCode.IsEnabled = enabled;
+    }
+
     private async void Verify_Click(object sender, RoutedEventArgs e)
     {
+        if (_verificationBusy) return;
+        _verificationBusy = true;
+        SetVerificationControlsEnabled(false);
+        GateError.IsOpen = false;
         // Digits only. Apple's own message and the Windows autofill both hand
         // over "123 456", and a stray space is not a wrong code.
         var code = new string(CodeBox.Text.Where(char.IsDigit).ToArray());
         try { await _sidecar.CallAsync("submit_2fa", new { code }); CodeBox.Text = ""; await BootAsync(); }
         catch (Exception error) { CodeBox.Text = ""; GateError.Message = error.Message; GateError.IsOpen = true; }
+        finally { _verificationBusy = false; SetVerificationControlsEnabled(true); }
     }
 
     private async void ResendCode_Click(object sender, RoutedEventArgs e) => await RequestCodeAsync();
@@ -292,8 +306,9 @@ public sealed partial class MainWindow : Window
     /// </remarks>
     private async Task RequestCodeAsync(string? method = null)
     {
-        ResendCode.IsEnabled = false;
-        TextCode.IsEnabled = false;
+        if (_verificationBusy) return;
+        _verificationBusy = true;
+        SetVerificationControlsEnabled(false);
         GateError.IsOpen = false;
         GateProgress.Visibility = Visibility.Collapsed;
         LoginFields.Visibility = Visibility.Collapsed;
@@ -310,7 +325,7 @@ public sealed partial class MainWindow : Window
             GateError.Message = error.Message;
             GateError.IsOpen = true;
         }
-        finally { ResendCode.IsEnabled = true; TextCode.IsEnabled = true; }
+        finally { _verificationBusy = false; SetVerificationControlsEnabled(true); }
     }
 
     /// Draw the code box for a challenge. Pure UI -- asks Apple for nothing.

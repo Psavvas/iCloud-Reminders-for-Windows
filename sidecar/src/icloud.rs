@@ -129,8 +129,7 @@ impl ICloudClient {
             .await
         {
             Ok(_) => {
-                self.pending_2fa =
-                    self.auth.state.hsa_version >= 2 && !self.auth.state.trusted_session;
+                self.pending_2fa = self.auth.requires_two_factor();
                 self.connected = !self.pending_2fa;
                 if remember {
                     secrets::set_password(&self.apple_id, &password)?;
@@ -170,7 +169,14 @@ impl ICloudClient {
             return false;
         }
         self.restoring = true;
-        let result = self.connect(None, true, false).await;
+        let result = match self.auth.resume_session().await {
+            Ok(true) => self.persist_session().map(|()| {
+                self.connected = true;
+                self.status()
+            }),
+            Ok(false) => self.connect(None, true, false).await,
+            Err(error) => Err(error),
+        };
         self.restoring = false;
         match result {
             Ok(_) => {
@@ -181,7 +187,8 @@ impl ICloudClient {
                 self.restore_failure = Some(RestoreFailure {
                     retryable: restore_is_worth_retrying(
                         &error,
-                        secrets::has_password(&self.apple_id),
+                        self.auth.state.session_token.is_some()
+                            || secrets::has_password(&self.apple_id),
                     ),
                     detail: error.body().detail.to_owned(),
                 });
@@ -241,10 +248,7 @@ impl ICloudClient {
         // Reminders lists live in a custom CloudKit zone. Apple's web client
         // exposes the full list snapshot through /changes/zone; querying the
         // raw List record type can return a successful but empty response.
-        let (records, _) = self
-            .cloudkit()?
-            .changes(None, Some(&["List"]))
-            .await?;
+        let (records, _) = self.cloudkit()?.changes(None, Some(&["List"])).await?;
         let mut lists = Vec::new();
         for (position, record) in records.iter().enumerate() {
             if cloudkit::int_field(record, "Deleted") != 0 {
@@ -703,7 +707,10 @@ mod session_tests {
         client.mark_awaiting_2fa();
 
         assert!(!client.restore().await);
-        assert!(client.awaiting_2fa(), "the live challenge must be left alone");
+        assert!(
+            client.awaiting_2fa(),
+            "the live challenge must be left alone"
+        );
         assert!(
             !client.restore_is_retryable(),
             "the person at the code box finishes this, not a retry loop"

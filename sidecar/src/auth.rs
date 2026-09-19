@@ -36,8 +36,7 @@ const ACCEPT_JSON: &str = "application/json";
 /// The SMS verifier is the one endpoint pyicloud also offers plain text.
 const ACCEPT_JSON_TEXT: &str = "application/json, plain/text";
 const SETUP: &str = "https://setup.icloud.com/setup/ws/1";
-const WIDGET_KEY: &str =
-    "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d";
+const WIDGET_KEY: &str = "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d";
 const CLIENT_BUILD_NUMBER: &str = "2534Project66";
 const CLIENT_MASTERING_NUMBER: &str = "2534B22";
 const CKJS_BUILD_VERSION: &str = "17DProjectDev77";
@@ -61,6 +60,8 @@ pub struct SessionState {
     pub hsa_version: i64,
     #[serde(default)]
     pub trusted_session: bool,
+    #[serde(default)]
+    pub challenge_required: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -134,6 +135,8 @@ struct SrpProof {
 }
 
 pub struct AuthClient {
+    auth_endpoint: String,
+    setup_endpoint: String,
     http: reqwest::Client,
     pub state: SessionState,
     /// The route the outstanding code went out on. Deliberately not part of
@@ -168,12 +171,6 @@ pub struct AuthClient {
     /// When the outstanding code was sent, so the log can show its age. Codes
     /// expire, and an expired one is refused exactly like a wrong one.
     sent_at: Option<std::time::Instant>,
-    /// Apple pushed a prompt to the trusted devices. Tracked apart from
-    /// `sent_on` because that drives the "a code is waiting for you" flag in
-    /// the UI, and a device push must not stop the app from also requesting the
-    /// text the user is actually being asked for. It only means the device
-    /// verifier is worth trying a code against.
-    device_pushed: bool,
     scnt_generation: u32,
     session_generation: u32,
 }
@@ -202,6 +199,8 @@ impl AuthClient {
         }
         let http = Self::build_http()?;
         Ok(Self {
+            auth_endpoint: IDMSA.into(),
+            setup_endpoint: SETUP.into(),
             http,
             state,
             route: TwoFactorRoute::Unknown,
@@ -212,7 +211,6 @@ impl AuthClient {
             options_loaded: false,
             challenge_mode: None,
             sent_at: None,
-            device_pushed: false,
             scnt_generation: 0,
             session_generation: 0,
         })
@@ -281,9 +279,8 @@ impl AuthClient {
         // an empty jar, a pairing Apple has no reason to honour. Discarding
         // both restores the consistency pyicloud gets by keeping both.
         //
-        // Nothing durable is lost: `restore` re-runs the full handshake
-        // regardless, and the tokens that survive a restart -- the session and
-        // trust tokens -- are deliberately left in place below.
+        // Restore tries the durable session token first. This password fallback
+        // preserves the trust token but starts a fresh challenge and cookie jar.
         self.http = Self::build_http()?;
         self.state.session_id = None;
         self.state.scnt = None;
@@ -298,7 +295,7 @@ impl AuthClient {
         let auth_headers = self.idmsa_headers(ACCEPT_AUTH)?;
         let bootstrap = self
             .http
-            .get(format!("{IDMSA}/authorize/signin"))
+            .get(format!("{}/authorize/signin", self.auth_endpoint))
             .headers(auth_headers)
             .query(&[
                 ("frame_id", self.state.client_id.as_str()),
@@ -327,7 +324,7 @@ impl AuthClient {
 
         let init = self
             .http
-            .post(format!("{IDMSA}/signin/init"))
+            .post(format!("{}/signin/init", self.auth_endpoint))
             .headers(self.idmsa_headers(ACCEPT_AUTH)?)
             .json(&json!({
                 "accountName": apple_id,
@@ -347,7 +344,7 @@ impl AuthClient {
 
         let complete = self
             .http
-            .post(format!("{IDMSA}/signin/complete"))
+            .post(format!("{}/signin/complete", self.auth_endpoint))
             .headers(self.idmsa_headers(ACCEPT_AUTH)?)
             .query(&[("isRememberMeEnabled", "true")])
             .json(&json!({
@@ -375,7 +372,6 @@ impl AuthClient {
                 self.sent_on.clear();
                 self.notice = None;
                 self.options_loaded = false;
-                self.device_pushed = false;
                 self.note_auth_options(&body);
                 // Fix the route now, so a code is verified against the right
                 // endpoint even if nothing else gets a say. Deliberately *not*
@@ -388,10 +384,8 @@ impl AuthClient {
                     self.route = TwoFactorRoute::TrustedDevice;
                 }
                 self.notice = apple_message(&body);
-                // Everything pyicloud does before the user is asked for a
-                // code. Skipping it left Apple's side of the challenge
-                // unadvanced, which is why verification came back with the
-                // challenge document instead of a verdict.
+                // Load the challenge and exchange the limited setup token.
+                // Delivery belongs to the code screen, once, after this returns.
                 self.prime_two_factor().await;
             }
             return Err(error);
@@ -405,7 +399,7 @@ impl AuthClient {
             Err(AppError::TermsRequired { .. }) if accept_terms => {
                 let accepted = self
                     .http
-                    .post(format!("{SETUP}/acceptTermsOfService"))
+                    .post(format!("{}/acceptTermsOfService", self.setup_endpoint))
                     .query(&self.query())
                     .headers(self.setup_headers()?)
                     .json(&json!({}))
@@ -422,6 +416,25 @@ impl AuthClient {
             other => other?,
         }
         Ok(response)
+    }
+
+    /// Recreate service cookies from the saved token without issuing a new SRP challenge.
+    /// A rejected or no-longer-trusted token permits a password fallback; network
+    /// failures must retain the saved session for a later retry.
+    pub async fn resume_session(&mut self) -> Result<bool> {
+        if self.state.session_token.is_none() {
+            return Ok(false);
+        }
+        match self.account_login().await {
+            Ok(()) => Ok(!self.requires_two_factor()),
+            Err(AppError::AuthRequired { .. } | AppError::TwoFactorRequired { .. }) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn requires_two_factor(&self) -> bool {
+        self.state.hsa_version >= 2
+            && (self.state.challenge_required || !self.state.trusted_session)
     }
 
     async fn account_login(&mut self) -> Result<()> {
@@ -448,12 +461,13 @@ impl AuthClient {
         }
         let response = self
             .http
-            .post(format!("{SETUP}/accountLogin"))
+            .post(format!("{}/accountLogin", self.setup_endpoint))
             .query(&self.query())
             .headers(self.setup_headers()?)
             .json(&body)
             .send()
             .await?;
+        self.capture_headers(response.headers());
         let status = response.status();
         let text = bounded_response_text(response).await?;
         if !status.is_success() {
@@ -468,6 +482,10 @@ impl AuthClient {
             .pointer("/dsInfo/hsaVersion")
             .and_then(Value::as_i64)
             .unwrap_or(0);
+        self.state.challenge_required = value
+            .get("hsaChallengeRequired")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         self.state.trusted_session = value
             .pointer("/hsaTrustedBrowser")
             .and_then(Value::as_bool)
@@ -512,7 +530,7 @@ impl AuthClient {
         }
         let response = self
             .http
-            .get(format!("{IDMSA}/verify/trusteddevice"))
+            .get(format!("{}/verify/trusteddevice", self.auth_endpoint))
             .headers(self.idmsa_headers(ACCEPT_JSON)?)
             .send()
             .await?;
@@ -620,63 +638,16 @@ impl AuthClient {
         Ok(())
     }
 
-    /// The four requests pyicloud makes between `signin/complete` answering
-    /// 409 and the user being prompted (base.py:632-541).
-    ///
-    /// Every one of them is fire-and-forget there, and is here too: each exists
-    /// to advance Apple's server-side state, not to return data, and pyicloud
-    /// swallows their failures. The one that matters most is `accountLogin`,
-    /// which spends the limited `X-Apple-Session-Token` Apple hands back with
-    /// the 409. This connector previously returned the 2FA error before
-    /// reaching it, so that token was never spent and the challenge never
-    /// progressed.
-    ///
-    /// The SMS sent here is deliberately *not* recorded as delivered, so the
-    /// caller still requests one. That reproduces pyicloud's two `PUT
-    /// verify/phone` calls, and it matters: the second response is what
-    /// refreshes the `scnt` and `X-Apple-Auth-Attributes` that verification
-    /// then has to carry.
+    /// Prepare the challenge without delivering a code. The UI requests delivery
+    /// once it displays the code entry screen. Sending here as well would issue
+    /// two SMS codes and invalidate the first before the user could enter it.
     async fn prime_two_factor(&mut self) {
         if let Err(error) = self.load_auth_options().await {
-            eprintln!("2fa: priming: auth options failed ({})", error.code());
+            eprintln!("2fa: auth options failed ({})", error.code());
         }
-        if let Err(error) = self.nudge_trusted_device().await {
-            eprintln!("2fa: priming: device nudge failed ({})", error.code());
+        if let Err(error) = self.account_login().await {
+            eprintln!("2fa: accountLogin said {}", error.code());
         }
-        if let Some(phone) = self.phones.first().cloned() {
-            match self.put_verify_phone(&phone).await {
-                Ok((status, _)) => eprintln!("2fa: priming: first sms request HTTP {status}"),
-                Err(error) => eprintln!("2fa: priming: first sms request failed ({})", error.code()),
-            }
-        }
-        // Expected to report that two-factor is still outstanding. It is sent
-        // for its effect on the session, not its answer.
-        match self.account_login().await {
-            Ok(()) => eprintln!("2fa: priming: accountLogin accepted the limited token"),
-            Err(error) => eprintln!("2fa: priming: accountLogin said {}", error.code()),
-        }
-        eprintln!("2fa: priming: {}", self.challenge_summary());
-    }
-
-    /// pyicloud's `GET verify/trusteddevice` nudge (base.py:841-847). Sent even
-    /// on a phone-only account, and its result is discarded there.
-    async fn nudge_trusted_device(&mut self) -> Result<()> {
-        let response = self
-            .http
-            .get(format!("{IDMSA}/verify/trusteddevice"))
-            .headers(self.idmsa_headers(ACCEPT_JSON)?)
-            .send()
-            .await?;
-        self.capture_headers(response.headers());
-        let status = response.status();
-        let body = bounded_response_text(response).await?;
-        self.note_auth_options(&body);
-        // Apple shows the prompt on a 2xx and, on some accounts, on a 4xx too;
-        // either way a code is now on the user's devices and the device
-        // verifier is worth trying against.
-        self.device_pushed = true;
-        eprintln!("2fa: priming: device nudge HTTP {}", status.as_u16());
-        Ok(())
     }
 
     /// `PUT verify/phone`. pyicloud hard-codes `mode: "sms"` on this request
@@ -684,7 +655,7 @@ impl AuthClient {
     async fn put_verify_phone(&mut self, phone: &TrustedPhone) -> Result<(u16, String)> {
         let response = self
             .http
-            .put(format!("{IDMSA}/verify/phone"))
+            .put(format!("{}/verify/phone", self.auth_endpoint))
             .headers(self.idmsa_headers(ACCEPT_JSON)?)
             .json(&json!({"phoneNumber": phone.payload(), "mode": "sms"}))
             .send()
@@ -703,7 +674,7 @@ impl AuthClient {
         // richer form first and fall back to JSON when it is not parseable.
         let response = self
             .http
-            .get(IDMSA)
+            .get(&self.auth_endpoint)
             .headers(self.idmsa_headers("text/html")?)
             .send()
             .await?;
@@ -718,7 +689,7 @@ impl AuthClient {
 
         let fallback = self
             .http
-            .get(IDMSA)
+            .get(&self.auth_endpoint)
             .headers(self.idmsa_headers(ACCEPT_JSON)?)
             .send()
             .await?;
@@ -734,16 +705,14 @@ impl AuthClient {
         let Ok(value) = serde_json::from_str::<Value>(body) else {
             return;
         };
-        if let Some(count) = value
-            .pointer("/trustedDeviceCount")
-            .and_then(Value::as_i64)
-        {
+        if let Some(count) = value.pointer("/trustedDeviceCount").and_then(Value::as_i64) {
             self.trusted_device_count = count;
         }
         if let Some(mode) = value.pointer("/mode").and_then(Value::as_str)
-            && !mode.trim().is_empty() {
-                self.challenge_mode = Some(mode.trim().to_owned());
-            }
+            && !mode.trim().is_empty()
+        {
+            self.challenge_mode = Some(mode.trim().to_owned());
+        }
         // pyicloud's `_trusted_phone_number` precedence (base.py:974-983),
         // strictly: the top-level singular record, then the one nested under
         // phoneNumberVerification, then the *first* of that nested list. It
@@ -813,16 +782,14 @@ impl AuthClient {
                 routes.push(route);
             }
         }
-        // A device prompt raised during priming is a second live challenge with
-        // its own code. Whichever of the two the user typed, one of these
-        // endpoints is the one that can accept it.
-        if self.device_pushed && !routes.contains(&TwoFactorRoute::TrustedDevice) {
-            routes.push(TwoFactorRoute::TrustedDevice);
-        }
         eprintln!(
             "2fa: verifying against {} route(s): {}",
             routes.len(),
-            routes.iter().map(TwoFactorRoute::name).collect::<Vec<_>>().join(", ")
+            routes
+                .iter()
+                .map(TwoFactorRoute::name)
+                .collect::<Vec<_>>()
+                .join(", ")
         );
 
         for (index, route) in routes.iter().enumerate() {
@@ -893,7 +860,7 @@ impl AuthClient {
         }
         let trust = self
             .http
-            .get(format!("{IDMSA}/2sv/trust"))
+            .get(format!("{}/2sv/trust", self.auth_endpoint))
             .headers(self.idmsa_headers(ACCEPT_AUTH)?)
             .send()
             .await?;
@@ -903,7 +870,16 @@ impl AuthClient {
         self.route = TwoFactorRoute::Unknown;
         self.sent_on.clear();
         self.notice = None;
-        self.account_login().await
+        self.account_login().await?;
+        if self.requires_two_factor() {
+            return Err(AppError::TwoFactorRequired {
+                message:
+                    "Apple has not finished verifying this session. Please try signing in again."
+                        .into(),
+                detail: String::new(),
+            });
+        }
+        Ok(())
     }
 
     /// The route to try first: whatever a code last went out on.
@@ -922,7 +898,7 @@ impl AuthClient {
     ) -> Result<(reqwest::StatusCode, String)> {
         let (url, body, accept) = match route {
             TwoFactorRoute::Sms(id, mode) => (
-                format!("{IDMSA}/verify/phone/securitycode"),
+                format!("{}/verify/phone/securitycode", self.auth_endpoint),
                 json!({
                     "phoneNumber": self
                         .phones
@@ -936,7 +912,7 @@ impl AuthClient {
                 ACCEPT_JSON_TEXT,
             ),
             _ => (
-                format!("{IDMSA}/verify/trusteddevice/securitycode"),
+                format!("{}/verify/trusteddevice/securitycode", self.auth_endpoint),
                 json!({"securityCode":{"code":code}}),
                 ACCEPT_JSON,
             ),
@@ -977,8 +953,10 @@ impl AuthClient {
     /// The texted code is a different endpoint and plain HTTP, so it is the way
     /// through until the bridge exists.
     fn is_wrong_verifier(route: &TwoFactorRoute, status: u16) -> bool {
-        matches!(route, TwoFactorRoute::TrustedDevice | TwoFactorRoute::Unknown)
-            && status == 409
+        matches!(
+            route,
+            TwoFactorRoute::TrustedDevice | TwoFactorRoute::Unknown
+        ) && status == 409
     }
 
     /// Headers for a request to Apple's auth server.
@@ -1221,12 +1199,7 @@ fn make_proof(
         });
     }
 
-    let derived = derive_password(
-        password,
-        &salt,
-        challenge.iterations,
-        &challenge.protocol,
-    );
+    let derived = derive_password(password, &salt, challenge.iterations, &challenge.protocol);
     // Apple's GSA mode deliberately excludes the username from x. It retains
     // the separator byte, so x = H(salt || H(":" || derived password)).
     let identity_hash = Zeroizing::new(hash(&[b":", derived.as_ref()]));
@@ -1376,17 +1349,23 @@ fn body_shape(body: &str) -> String {
             "body fields: {}",
             map.keys().take(12).cloned().collect::<Vec<_>>().join(", ")
         ),
-        other => format!("body: bare {}", match other {
-            Value::Null => "null",
-            Value::Bool(_) => "bool",
-            Value::Number(_) => "number",
-            Value::String(_) => "string",
-            Value::Array(_) => "array",
-            Value::Object(_) => "object",
-        }),
+        other => format!(
+            "body: bare {}",
+            match other {
+                Value::Null => "null",
+                Value::Bool(_) => "bool",
+                Value::Number(_) => "number",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+            }
+        ),
     };
     if log_apple_bodies() {
-        return format!("{shape} | raw: {}", body.chars().take(600).collect::<String>());
+        return format!(
+            "{shape} | raw: {}",
+            body.chars().take(600).collect::<String>()
+        );
     }
     shape
 }
@@ -1599,13 +1578,7 @@ mod tests {
         let mut challenge = vector_challenge("s2k");
         challenge.server_public = B64.encode(super::modulus().expect("modulus").to_bytes_be());
         assert!(
-            make_proof(
-                VECTOR_USER,
-                VECTOR_PASSWORD,
-                vector_private(),
-                &challenge
-            )
-            .is_err(),
+            make_proof(VECTOR_USER, VECTOR_PASSWORD, vector_private(), &challenge).is_err(),
             "B congruent to 0 mod N must abort"
         );
     }
@@ -1622,13 +1595,7 @@ mod tests {
             let mut challenge = vector_challenge("s2k");
             mutate(&mut challenge);
             assert!(
-                make_proof(
-                    VECTOR_USER,
-                    VECTOR_PASSWORD,
-                    vector_private(),
-                    &challenge
-                )
-                .is_err(),
+                make_proof(VECTOR_USER, VECTOR_PASSWORD, vector_private(), &challenge).is_err(),
                 "invalid sign-in parameters must be rejected"
             );
         }
@@ -1671,8 +1638,8 @@ mod tests {
 #[cfg(test)]
 mod two_factor_tests {
     use super::{AuthClient, TwoFactorRoute, classify_code_rejection, is_wrong_code};
-    use serde_json::json;
     use crate::error::AppError;
+    use serde_json::json;
 
     #[test]
     fn the_challenge_options_name_where_a_code_can_be_sent() {
@@ -1775,7 +1742,10 @@ mod two_factor_tests {
         // route it committed to, which is decided before any request goes out.
         let _ = auth.request_2fa().await;
         assert!(
-            !auth.sent_on.iter().any(|route| matches!(route, TwoFactorRoute::Sms(..))),
+            !auth
+                .sent_on
+                .iter()
+                .any(|route| matches!(route, TwoFactorRoute::Sms(..))),
             "a text must only ever follow the user asking for one"
         );
     }
@@ -1827,10 +1797,11 @@ mod two_factor_tests {
         let AppError::TwoFactorRequired { message, .. } = error else {
             panic!("wrong variant");
         };
-        assert!(message.starts_with("Incorrect verification code."), "{message}");
-        assert!(is_wrong_code(
-            r#"{"service_errors":[{"code":"-21669"}]}"#
-        ));
+        assert!(
+            message.starts_with("Incorrect verification code."),
+            "{message}"
+        );
+        assert!(is_wrong_code(r#"{"service_errors":[{"code":"-21669"}]}"#));
     }
 
     #[test]
@@ -1967,7 +1938,10 @@ mod two_factor_tests {
 
     #[test]
     fn a_409_from_the_device_verifier_is_the_wrong_door_not_a_wrong_code() {
-        assert!(AuthClient::is_wrong_verifier(&TwoFactorRoute::TrustedDevice, 409));
+        assert!(AuthClient::is_wrong_verifier(
+            &TwoFactorRoute::TrustedDevice,
+            409
+        ));
         assert!(AuthClient::is_wrong_verifier(&TwoFactorRoute::Unknown, 409));
     }
 
@@ -1975,7 +1949,10 @@ mod two_factor_tests {
     fn an_ordinary_refusal_is_not_mistaken_for_the_wrong_door() {
         // A mistyped code, and a texted code Apple simply did not like, both
         // stay the user's problem to retry rather than a dead end.
-        assert!(!AuthClient::is_wrong_verifier(&TwoFactorRoute::TrustedDevice, 400));
+        assert!(!AuthClient::is_wrong_verifier(
+            &TwoFactorRoute::TrustedDevice,
+            400
+        ));
         assert!(!AuthClient::is_wrong_verifier(
             &TwoFactorRoute::Sms(2, "sms".into()),
             409
@@ -2082,7 +2059,8 @@ mod two_factor_tests {
             "application/json"
         );
         assert_eq!(
-            auth.idmsa_headers(super::ACCEPT_JSON_TEXT).expect("headers")["accept"],
+            auth.idmsa_headers(super::ACCEPT_JSON_TEXT)
+                .expect("headers")["accept"],
             "application/json, plain/text"
         );
     }
@@ -2168,7 +2146,10 @@ mod challenge_state_tests {
                 "numberWithDialCode":"+1 ***7"}}"#,
         );
         assert_eq!(auth.challenge_mode.as_deref(), Some("voice"));
-        assert_eq!(auth.phones[0].id, 7, "the active challenge phone comes first");
+        assert_eq!(
+            auth.phones[0].id, 7,
+            "the active challenge phone comes first"
+        );
         assert_eq!(auth.phones[0].non_fteu, Some(true));
         assert_eq!(auth.phones[0].payload()["nonFTEU"], serde_json::json!(true));
     }
@@ -2202,10 +2183,19 @@ mod challenge_state_tests {
         auth.state.scnt = None;
         auth.state.auth_attributes = None;
 
-        assert_eq!(auth.state.session_token.as_deref(), Some("durable-session-token"));
-        assert_eq!(auth.state.trust_token.as_deref(), Some("durable-trust-token"));
+        assert_eq!(
+            auth.state.session_token.as_deref(),
+            Some("durable-session-token")
+        );
+        assert_eq!(
+            auth.state.trust_token.as_deref(),
+            Some("durable-trust-token")
+        );
         assert_eq!(auth.state.account_country.as_deref(), Some("USA"));
-        assert_eq!(auth.state.client_id, "fixed-client-id", "client id is stable");
+        assert_eq!(
+            auth.state.client_id, "fixed-client-id",
+            "client id is stable"
+        );
 
         // And none of the cleared ones reach Apple's auth server.
         let headers = auth.idmsa_headers(super::ACCEPT_JSON).expect("headers");
@@ -2215,27 +2205,17 @@ mod challenge_state_tests {
     }
 
     #[test]
-    fn a_device_push_adds_a_route_without_claiming_a_code_was_sent() {
-        let mut auth = AuthClient::new(None).expect("client");
-        auth.device_pushed = true;
-        assert_eq!(
-            auth.two_factor_status()["sent"],
-            serde_json::json!(false),
-            "a device push must not make the app skip requesting the text"
-        );
-
-        auth.mark_sent(TwoFactorRoute::Sms(7, "sms".into()));
-        assert_eq!(auth.two_factor_status()["sent"], serde_json::json!(true));
-    }
-
-    #[test]
     fn the_singular_record_wins_over_a_list_in_the_same_document() {
         let mut auth = AuthClient::new(None).expect("client");
         auth.note_auth_options(
             r#"{"trustedPhoneNumber":{"id":7,"pushMode":"sms","nonFTEU":true},
                 "trustedPhoneNumbers":[{"id":3,"pushMode":"sms"},{"id":9,"pushMode":"voice"}]}"#,
         );
-        assert_eq!(auth.phones[0].id, 7, "singular must lead: {:?}", auth.phones);
+        assert_eq!(
+            auth.phones[0].id, 7,
+            "singular must lead: {:?}",
+            auth.phones
+        );
         assert_eq!(auth.phones[0].non_fteu, Some(true));
         // The listed alternatives stay reachable behind it.
         assert!(auth.phones.iter().any(|p| p.id == 3));
@@ -2283,3 +2263,7 @@ mod challenge_state_tests {
         assert_ne!(route, TwoFactorRoute::Sms(7, "sms".into()));
     }
 }
+
+#[cfg(test)]
+#[path = "auth_flow_tests.rs"]
+mod flow_tests;

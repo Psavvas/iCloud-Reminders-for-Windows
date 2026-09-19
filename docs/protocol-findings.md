@@ -140,3 +140,24 @@ Two things keep it honest:
   `x86_64-pc-windows-msvc` does *not* work here -- `ring`'s build script needs a
   real MSVC toolchain. Verified to catch a deliberately unused method that the
   Linux run passes over.
+
+## Authentication lifecycle regression checks
+
+The Rust connector prepares the challenge without requesting delivery. The
+code-entry screen requests one SMS; only an explicit resend requests another.
+Verification and delivery controls are disabled together while either request
+is in flight. The previous priming step sent an untracked SMS before the UI
+requested a second one, creating a code-invalidation risk.
+
+Startup first exchanges the saved session and trust tokens through accountLogin,
+which recreates service cookies. Only a rejected or limited token falls back to
+a password handshake. A network failure retains the saved tokens for retry.
+Session data stays in Windows Credential Manager; closing the window does not
+invoke sign-out. An explicit hsaChallengeRequired response is honored even when
+hsaTrustedBrowser is true.
+
+Local HTTP tests in sidecar/src/auth_flow_tests.rs cover the preparation,
+delivery, verification and trust sequence, rotated headers and cookies, token
+restoration, server outages and rejected or incomplete sessions. These checks
+validate client behavior; a real Apple account must still confirm successful
+sign-in followed by closing and reopening the built application.
