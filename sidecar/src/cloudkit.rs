@@ -36,10 +36,10 @@ impl<'a> CloudKit<'a> {
             .webservices
             .get("ckdatabasews")
             .or_else(|| auth.state.webservices.get("reminders"))
-            .ok_or_else(|| AppError::AuthRequired {
-                message: "This iCloud session did not expose the Reminders service".into(),
-                detail: String::new(),
-            })?;
+            .ok_or_else(|| AppError::internal(
+                "This iCloud session did not expose the Reminders service",
+                "Apple did not provide a usable ckdatabasews or reminders endpoint.",
+            ))?;
         let parsed = reqwest::Url::parse(&service.url).map_err(|e| {
             AppError::internal("iCloud returned an invalid service URL", e.to_string())
         })?;

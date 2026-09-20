@@ -280,3 +280,41 @@ fn token_issuance_does_not_override_explicit_rejection_or_another_http_error() {
     ));
     assert!(!code_response_accepted(409, r#"{"hasError":true}"#, true));
 }
+
+#[tokio::test]
+async fn unrelated_service_entries_do_not_erase_the_reminders_endpoint() {
+    let body = r#"{
+        "dsInfo":{"dsid":"123","hsaVersion":2},
+        "hsaTrustedBrowser":true,
+        "webservices":{
+            "ckdatabasews":{"url":"https://p01-ckdatabasews.icloud.com","status":null},
+            "disabled":{"status":"inactive"},
+            "empty":{"url":""},
+            "null_service":null,
+            "other":{"url":"https://p01-example.icloud.com","status":1}
+        }
+    }"#;
+    let (mut auth, server) = mock(vec![("POST", "/setup/accountLogin", 200, "", body)]);
+    auth.state.session_token = Some("saved-token".into());
+    assert!(auth.resume_session().await.unwrap());
+    assert_eq!(auth.state.webservices.len(), 2);
+    crate::cloudkit::CloudKit::new(&auth).expect("valid Reminders service survives");
+    let saved = serde_json::to_string(&auth.state).unwrap();
+    let restored: SessionState = serde_json::from_str(&saved).unwrap();
+    assert!(restored.webservices.contains_key("ckdatabasews"));
+    server.join().unwrap();
+}
+
+#[test]
+fn missing_service_is_not_an_expired_session_and_unsafe_urls_remain_rejected() {
+    let mut auth = AuthClient::new(None).unwrap();
+    let error = crate::cloudkit::CloudKit::new(&auth)
+        .err()
+        .expect("missing endpoint");
+    assert!(matches!(error, AppError::Internal { .. }));
+    auth.state.webservices = parse_webservices(Some(&json!({
+        "ckdatabasews":{"url":"https://icloud.com.attacker.example"},
+        "disabled":{"status":"inactive"}
+    })));
+    assert!(crate::cloudkit::CloudKit::new(&auth).is_err());
+}

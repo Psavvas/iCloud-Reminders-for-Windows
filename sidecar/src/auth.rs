@@ -490,9 +490,13 @@ impl AuthClient {
             .pointer("/hsaTrustedBrowser")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        self.state.webservices =
-            serde_json::from_value(value.get("webservices").cloned().unwrap_or(json!({})))
-                .unwrap_or_default();
+        self.state.webservices = parse_webservices(value.get("webservices"));
+        eprintln!(
+            "auth: setup services={} reminders_endpoint={}",
+            self.state.webservices.len(),
+            self.state.webservices.contains_key("ckdatabasews")
+                || self.state.webservices.contains_key("reminders")
+        );
         if value.get("termsUpdateNeeded").and_then(Value::as_bool) == Some(true) {
             return Err(AppError::TermsRequired {
                 message: "Apple requires you to accept updated iCloud terms.".into(),
@@ -1426,6 +1430,35 @@ fn apple_error_code(body: &str) -> Option<String> {
         Value::Number(number) => Some(number.to_string()),
         _ => None,
     }
+}
+
+/// Service availability entries need not all contain endpoints. A disabled or
+/// malformed unrelated entry must not erase valid CloudKit service discovery.
+/// URL security validation stays in CloudKit::new before any network request.
+fn parse_webservices(value: Option<&Value>) -> BTreeMap<String, Service> {
+    let Some(services) = value.and_then(Value::as_object) else {
+        return BTreeMap::new();
+    };
+    services
+        .iter()
+        .filter_map(|(name, entry)| {
+            let url = entry.get("url")?.as_str()?.trim();
+            if url.is_empty() {
+                return None;
+            }
+            Some((
+                name.clone(),
+                Service {
+                    url: url.to_owned(),
+                    status: entry
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// Read only Apple's verdict, never the echoed code or other response values.
