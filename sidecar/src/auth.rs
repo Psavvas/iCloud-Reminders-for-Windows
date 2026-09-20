@@ -1561,22 +1561,31 @@ fn safe_detail(body: &str) -> String {
     "Apple returned an error without a public reason".into()
 }
 
-pub(crate) async fn bounded_response_text(mut response: reqwest::Response) -> Result<String> {
+pub(crate) async fn bounded_response_text(response: reqwest::Response) -> Result<String> {
+    bounded_response_text_with_limit(response, MAX_APPLE_RESPONSE_BYTES).await
+}
+
+/// Enforce a byte cap on decoded chunks too: Content-Length may be absent or
+/// describe compressed data rather than the amount we hold in memory.
+pub(crate) async fn bounded_response_text_with_limit(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<String> {
     if response
         .content_length()
-        .is_some_and(|size| size > MAX_APPLE_RESPONSE_BYTES.try_into().unwrap_or(u64::MAX))
+        .is_some_and(|size| size > max_bytes.try_into().unwrap_or(u64::MAX))
     {
         return Err(AppError::Network {
             message: "iCloud returned an unexpectedly large response".into(),
-            detail: String::new(),
+            detail: format!("Response exceeded the {max_bytes}-byte limit"),
         });
     }
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await? {
-        if body.len().saturating_add(chunk.len()) > MAX_APPLE_RESPONSE_BYTES {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
             return Err(AppError::Network {
                 message: "iCloud returned an unexpectedly large response".into(),
-                detail: String::new(),
+                detail: format!("Response exceeded the {max_bytes}-byte limit"),
             });
         }
         body.extend_from_slice(&chunk);
@@ -2348,3 +2357,7 @@ mod challenge_state_tests {
 #[cfg(test)]
 #[path = "auth_flow_tests.rs"]
 mod flow_tests;
+
+#[cfg(test)]
+#[path = "response_tests.rs"]
+mod response_tests;

@@ -9,8 +9,12 @@ use base64::engine::general_purpose::STANDARD as B64;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
-use crate::auth::{AuthClient, bounded_response_text};
+use crate::auth::{AuthClient, bounded_response_text_with_limit};
 use crate::error::{AppError, Result};
+
+// Record pages contain notes and encoded fields and can exceed the 2 MiB
+// authentication budget. Keep a finite cap on each decoded CloudKit response.
+pub(crate) const MAX_CLOUDKIT_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 const CONTAINER: &str = "com.apple.reminders";
 const ENVIRONMENT: &str = "production";
@@ -223,7 +227,7 @@ impl<'a> CloudKit<'a> {
             .send()
             .await?;
         let status = response.status();
-        let text = bounded_response_text(response).await?;
+        let text = bounded_response_text_with_limit(response, MAX_CLOUDKIT_RESPONSE_BYTES).await?;
         if !status.is_success() {
             return Err(classify_cloudkit(status, &text));
         }
