@@ -513,7 +513,7 @@ fn optional_string<'a>(
     name: &str,
     max_bytes: usize,
 ) -> Result<Option<&'a str>> {
-    let Some(value) = object.get(name) else {
+    let Some(value) = object.get(name).filter(|value| !value.is_null()) else {
         return Ok(None);
     };
     let value = value
@@ -545,6 +545,36 @@ mod tests {
         let server = Server::open(dir.path(), Some("someone@example.com".into()), tx)
             .expect("open server");
         (dir, server, rx)
+    }
+
+    #[tokio::test]
+    async fn reminders_accept_null_search_from_the_windows_ui() {
+        let (_dir, server, _rx) = server();
+        server.dispatch("create_reminder", json!({
+            "list_id": "list-1", "title": "Water the plants"
+        })).await.expect("create offline reminder");
+        for query in [json!({"scope":"all"}),
+            json!({"scope":"all", "search":null, "sort":"manual", "include_completed":false}),
+            json!({"scope":"all", "search":""}),
+            json!({"scope":"all", "search":"plants"})] {
+            let rows = server.dispatch("reminders", query).await.expect("load reminders");
+            assert_eq!(rows.as_array().unwrap().len(), 1);
+            assert_eq!(rows[0]["title"], "Water the plants");
+        }
+        let rows = server.dispatch("reminders", json!({"scope":"all", "search":"unmatched"}))
+            .await.expect("search works");
+        assert!(rows.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn optional_search_still_rejects_non_text_values() {
+        let (_dir, server, _rx) = server();
+        for value in [json!(42), json!(false), json!([]), json!({})] {
+            let error = server.dispatch("reminders", json!({"search":value}))
+                .await.expect_err("invalid search type");
+            assert_eq!(error.code(), "BAD_REQUEST");
+            assert_eq!(error.to_string(), "search must be text");
+        }
     }
 
     #[tokio::test]
