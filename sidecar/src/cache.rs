@@ -168,7 +168,7 @@ impl Cache {
             Ok(json!({
                 "id": row.get::<_, String>(0)?, "title": row.get::<_, String>(1)?,
                 "color_hex": row.get::<_, Option<String>>(2)?, "count": row.get::<_, i64>(3)?,
-                "is_group": row.get::<_, i64>(4)?, "position": row.get::<_, i64>(5)?,
+                "is_group": row.get::<_, bool>(4)?, "position": row.get::<_, i64>(5)?,
                 "open_count": row.get::<_, i64>(6)?,
             }))
         })?;
@@ -645,6 +645,23 @@ mod tests {
         );
         cache.set_meta("apple_id", None).unwrap();
         assert_eq!(cache.get_meta("apple_id").unwrap(), None);
+    }
+
+    #[test]
+    fn cached_lists_serialize_group_flags_as_json_booleans() {
+        let (_dir, cache) = cache();
+        cache.replace_lists(&[
+            ReminderList { id: "normal".into(), title: "Normal".into(), is_group: false, ..Default::default() },
+            ReminderList { id: "group".into(), title: "Group".into(), is_group: true, ..Default::default() },
+        ]).unwrap();
+        let lists = cache.lists().unwrap();
+        assert_eq!(lists[0]["is_group"], json!(false));
+        assert_eq!(lists[1]["is_group"], json!(true));
+        // The IPC response must round-trip into the same Boolean model used by
+        // the UI, even though SQLite stores the underlying values as 0 and 1.
+        let decoded: Vec<ReminderList> = serde_json::from_value(json!(lists)).unwrap();
+        assert!(!decoded[0].is_group);
+        assert!(decoded[1].is_group);
     }
 
     #[test]
