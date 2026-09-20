@@ -161,3 +161,18 @@ delivery, verification and trust sequence, rotated headers and cookies, token
 restoration, server outages and rejected or incomplete sessions. These checks
 validate client behavior; a real Apple account must still confirm successful
 sign-in followed by closing and reopening the built application.
+
+### Accepted verification responses with HTTP 409
+
+Do not classify a security-code response from its status alone. rclone's fix
+https://github.com/rclone/rclone/commit/731f2a6 documents accepted verification
+responses carrying HTTP 409 and an X-Apple-Session-Token. Issue 9730 also reports
+securityCode.valid=true without that response header. The connector now proceeds
+to trust when a 409 carries either positive signal, unless the body explicitly
+rejects the code. A previously saved token does not qualify. Successful trust
+and accountLogin confirming a trusted browser without an outstanding challenge
+are still required before the UI is authenticated.
+
+Verification diagnostics log only the optional valid boolean and token-presence
+boolean. They do not log the code or token. Existing field-name-only logs cannot
+establish whether an earlier 409 contained either acceptance signal.

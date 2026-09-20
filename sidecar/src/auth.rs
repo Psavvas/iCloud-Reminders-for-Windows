@@ -794,8 +794,16 @@ impl AuthClient {
 
         for (index, route) in routes.iter().enumerate() {
             let stamp_at_send = self.session_stamp();
-            let (status, text) = self.post_code(route, code).await?;
-            if status.is_success() {
+            let (status, text, issued_token) = self.post_code(route, code).await?;
+            let accepted = code_response_accepted(status.as_u16(), &text, issued_token);
+            eprintln!(
+                "2fa: verification HTTP {} valid={:?} issued_token={} continue_to_trust={}",
+                status.as_u16(),
+                code_validity(&text),
+                issued_token,
+                accepted
+            );
+            if accepted {
                 self.route = route.clone();
                 break;
             }
@@ -865,13 +873,16 @@ impl AuthClient {
             .send()
             .await?;
         self.capture_headers(trust.headers());
-        self.state.trusted_session = trust.status().is_success();
-        // The challenge is spent; nothing about it should outlive it.
-        self.route = TwoFactorRoute::Unknown;
-        self.sent_on.clear();
-        self.notice = None;
+        let trust_status = trust.status();
+        let trust_body = bounded_response_text(trust).await?;
+        if !trust_status.is_success() {
+            return Err(AppError::TwoFactorRequired {
+                message: "Apple accepted the code but did not establish session trust. Please sign in again.".into(),
+                detail: safe_detail(&trust_body),
+            });
+        }
         self.account_login().await?;
-        if self.requires_two_factor() {
+        if !self.state.trusted_session || self.requires_two_factor() {
             return Err(AppError::TwoFactorRequired {
                 message:
                     "Apple has not finished verifying this session. Please try signing in again."
@@ -879,6 +890,10 @@ impl AuthClient {
                 detail: String::new(),
             });
         }
+        // Clear delivery state only after Apple confirms a trusted session.
+        self.route = TwoFactorRoute::Unknown;
+        self.sent_on.clear();
+        self.notice = None;
         Ok(())
     }
 
@@ -895,7 +910,7 @@ impl AuthClient {
         &mut self,
         route: &TwoFactorRoute,
         code: &str,
-    ) -> Result<(reqwest::StatusCode, String)> {
+    ) -> Result<(reqwest::StatusCode, String, bool)> {
         let (url, body, accept) = match route {
             TwoFactorRoute::Sms(id, mode) => (
                 format!("{}/verify/phone/securitycode", self.auth_endpoint),
@@ -927,10 +942,14 @@ impl AuthClient {
         // Apple issues a fresh scnt here too. Without this the trust call that
         // follows echoes a stale one, fails, and a correct code ends as a failed
         // sign-in.
+        // Only a token on this response counts; a saved token predating the
+        // verification is not evidence that this code was accepted.
+        let issued_token = header(response.headers(), "x-apple-session-token")
+            .is_some_and(|token| !token.trim().is_empty());
         self.capture_headers(response.headers());
         let status = response.status();
         let text = bounded_response_text(response).await?;
-        Ok((status, text))
+        Ok((status, text, issued_token))
     }
 
     /// Whether a refusal is Apple saying this verifier is not the one to use.
@@ -1407,6 +1426,35 @@ fn apple_error_code(body: &str) -> Option<String> {
         Value::Number(number) => Some(number.to_string()),
         _ => None,
     }
+}
+
+/// Read only Apple's verdict, never the echoed code or other response values.
+fn code_validity(body: &str) -> Option<bool> {
+    serde_json::from_str::<Value>(body)
+        .ok()?
+        .pointer("/securityCode/valid")
+        .and_then(Value::as_bool)
+}
+
+/// A 409 can be an accepted code with another authentication step outstanding.
+/// See rclone/rclone commit 731f2a6 and issue 9730. This only permits attempting
+/// trust/accountLogin; it does not mark the account authenticated.
+fn code_response_accepted(status: u16, body: &str, issued_token: bool) -> bool {
+    let parsed = serde_json::from_str::<Value>(body).ok();
+    let explicit_error = parsed.as_ref().is_some_and(|value| {
+        value.get("hasError").and_then(Value::as_bool) == Some(true)
+            || ["service_errors", "serviceErrors"].iter().any(|key| {
+                value
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .is_some_and(|errors| !errors.is_empty())
+            })
+    });
+    if explicit_error || code_validity(body) == Some(false) {
+        return false;
+    }
+    (200..300).contains(&status)
+        || (status == 409 && (issued_token || code_validity(body) == Some(true)))
 }
 
 /// Whether Apple said, in as many words, that the digits were wrong.

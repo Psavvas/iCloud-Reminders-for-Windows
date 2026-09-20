@@ -169,3 +169,114 @@ async fn restore_distinguishes_rejection_from_outage_and_incomplete_challenge() 
         server.join().unwrap();
     }
 }
+
+#[tokio::test]
+async fn accepted_conflict_completes_trust_for_sms_and_device_codes() {
+    for (route, path, headers, body) in [
+        (
+            TwoFactorRoute::Sms(2, "sms".into()),
+            "/auth/verify/phone/securitycode ",
+            "X-Apple-Session-Token: verified-token\r\nscnt: verified\r\n",
+            "{}",
+        ),
+        (
+            TwoFactorRoute::Sms(2, "sms".into()),
+            "/auth/verify/phone/securitycode ",
+            "scnt: verified\r\n",
+            r#"{"securityCode":{"valid":true}}"#,
+        ),
+        (
+            TwoFactorRoute::TrustedDevice,
+            "/auth/verify/trusteddevice/securitycode ",
+            "scnt: verified\r\n",
+            r#"{"securityCode":{"valid":true}}"#,
+        ),
+    ] {
+        let (mut auth, server) = mock(vec![
+            ("POST", path, 409, headers, body),
+            (
+                "GET",
+                "/auth/2sv/trust ",
+                204,
+                "X-Apple-TwoSV-Trust-Token: trust-token\r\n",
+                "",
+            ),
+            ("POST", "/setup/accountLogin", 200, "", TRUSTED),
+        ]);
+        auth.state.session_token = Some("limited-token".into());
+        auth.mark_sent(route);
+        auth.submit_2fa("123456").await.unwrap();
+        assert!(auth.state.trusted_session);
+        let requests = server.join().unwrap();
+        assert!(requests[1].contains("scnt: verified"));
+        assert!(requests[2].contains("trust-token"));
+        if !headers.starts_with("scnt") {
+            assert!(requests[2].contains("verified-token"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn ambiguous_or_rejected_codes_never_attempt_trust() {
+    for body in [
+        "{}",
+        r#"{"securityCode":{"valid":false}}"#,
+        r#"{"securityCode":{"valid":true},"service_errors":[{"code":"-21669"}]}"#,
+    ] {
+        let (mut auth, server) = mock(vec![(
+            "POST",
+            "/auth/verify/phone/securitycode ",
+            409,
+            "",
+            body,
+        )]);
+        auth.state.session_token = Some("old-token-is-not-proof".into());
+        auth.mark_sent(TwoFactorRoute::Sms(2, "sms".into()));
+        assert!(matches!(
+            auth.submit_2fa("123456").await,
+            Err(AppError::TwoFactorRequired { .. })
+        ));
+        assert!(!auth.state.trusted_session);
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn accepted_code_is_not_a_trusted_session_until_apple_confirms() {
+    for account_body in [LIMITED, "{}"] {
+        let (mut auth, server) = mock(vec![
+            (
+                "POST",
+                "/auth/verify/phone/securitycode ",
+                409,
+                "",
+                r#"{"securityCode":{"valid":true}}"#,
+            ),
+            ("GET", "/auth/2sv/trust ", 204, "", ""),
+            ("POST", "/setup/accountLogin", 200, "", account_body),
+        ]);
+        auth.state.session_token = Some("limited-token".into());
+        auth.mark_sent(TwoFactorRoute::Sms(2, "sms".into()));
+        assert!(matches!(
+            auth.submit_2fa("123456").await,
+            Err(AppError::TwoFactorRequired { .. })
+        ));
+        assert!(!auth.state.trusted_session);
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn token_issuance_does_not_override_explicit_rejection_or_another_http_error() {
+    assert!(!code_response_accepted(
+        409,
+        r#"{"securityCode":{"valid":false}}"#,
+        true
+    ));
+    assert!(!code_response_accepted(
+        400,
+        r#"{"securityCode":{"valid":true}}"#,
+        true
+    ));
+    assert!(!code_response_accepted(409, r#"{"hasError":true}"#, true));
+}
